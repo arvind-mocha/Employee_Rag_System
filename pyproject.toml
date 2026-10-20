@@ -1,0 +1,25 @@
+[project]
+name = "employee-rag-system"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Arvind-mocha", email = "arvindarvind2210@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "chromadb>=1.0,<2",
+    "langchain-chroma>=0.2,<2",
+    "langchain-core>=0.3,<2",
+    "langchain-huggingface>=1.0,<2",
+    "langchain-text-splitters>=0.3,<2",
+    "sentence-transformers>=3,<6",
+]
+
+[project.scripts]
+employee-rag-system = "employee_rag_system:main"
+employee-rag-ingest = "employee_rag_system.ingest:main"
+
+[build-system]
+requires = ["uv_build>=0.12.13,<0.13.0"]
+build-backend = "uv_build"
