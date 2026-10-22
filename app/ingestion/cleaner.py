@@ -3,7 +3,7 @@ from pathlib import Path
 import re
 import unicodedata
 
-from app.Utility.file_handler import create_file
+from app.ingestion.file_handler import create_file
 from app.ingestion.extractor import extract_content
 
 

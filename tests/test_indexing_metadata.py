@@ -1,6 +1,6 @@
 import unittest
 
-from app.indexing.metadata import chunk_to_document
+from app.ingestion.metadata import chunk_to_document
 from app.ingestion.chunker import DocumentChunk
 
 

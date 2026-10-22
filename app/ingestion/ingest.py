@@ -1,9 +1,9 @@
 import logging
 
-from app.indexing.embeddings import EmbeddingSettings, create_embedding_model
-from app.indexing.vector_store import create_vector_store, index_chunks
 from app.ingestion.cleaner import clean_documents
 from app.ingestion.chunker import DocumentChunk, chunk_all_data
+from app.core.embeddings import EmbeddingSettings, create_embedding_model
+from app.ingestion.vector_store import create_vector_store, index_chunks
 
 
 DOCUMENTS_DIRECTORY = "data"

@@ -2,10 +2,12 @@ import os
 import unittest
 from unittest.mock import Mock, patch
 
-from app.indexing.vector_store import (
+from app.core.vector_store import (
     ID_COLUMN,
     PGVectorSettings,
     _to_pg_engine_url,
+)
+from app.ingestion.vector_store import (
     create_vector_store,
     index_chunks,
 )
@@ -35,8 +37,8 @@ class PGVectorSettingsTests(unittest.TestCase):
 
 
 class VectorStoreCreationTests(unittest.TestCase):
-    @patch("app.indexing.vector_store._open_vector_store")
-    @patch("app.indexing.vector_store.PGEngine.from_connection_string")
+    @patch("app.ingestion.vector_store.open_vector_store")
+    @patch("app.ingestion.vector_store.create_pg_engine")
     def test_uses_existing_vector_table(
         self,
         engine_factory: Mock,
@@ -53,9 +55,9 @@ class VectorStoreCreationTests(unittest.TestCase):
         self.assertIs(actual_store, expected_store)
         engine_factory.return_value.init_vectorstore_table.assert_not_called()
 
-    @patch("app.indexing.vector_store.get_embedding_dimension", return_value=384)
-    @patch("app.indexing.vector_store._open_vector_store")
-    @patch("app.indexing.vector_store.PGEngine.from_connection_string")
+    @patch("app.ingestion.vector_store.get_embedding_dimension", return_value=384)
+    @patch("app.ingestion.vector_store.open_vector_store")
+    @patch("app.ingestion.vector_store.create_pg_engine")
     def test_creates_missing_vector_table(
         self,
         engine_factory: Mock,
