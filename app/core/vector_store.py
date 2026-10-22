@@ -4,11 +4,7 @@ import re
 
 from dotenv import load_dotenv
 from langchain_core.embeddings import Embeddings
-from langchain_postgres import Column, PGEngine, PGVectorStore
-
-from app.indexing.embeddings import get_embedding_dimension
-from app.indexing.metadata import chunks_to_documents
-from app.ingestion.chunker import DocumentChunk
+from langchain_postgres import PGEngine, PGVectorStore
 
 
 DEFAULT_TABLE_NAME = "employee_documents"
@@ -76,11 +72,18 @@ def _to_pg_engine_url(database_url: str) -> str:
     )
 
 
-def _open_vector_store(
+def create_pg_engine(settings: PGVectorSettings) -> PGEngine:
+    return PGEngine.from_connection_string(
+        url=_to_pg_engine_url(settings.database_url)
+    )
+
+
+def open_vector_store(
     engine: PGEngine,
     embedding_model: Embeddings,
     settings: PGVectorSettings,
 ) -> PGVectorStore:
+    """Open an existing PGVector table."""
     return PGVectorStore.create_sync(
         engine=engine,
         embedding_service=embedding_model,
@@ -90,54 +93,11 @@ def _open_vector_store(
     )
 
 
-def create_vector_store(
+def connect_vector_store(
     embedding_model: Embeddings,
     settings: PGVectorSettings | None = None,
-    *,
-    recreate_table: bool = False,
 ) -> PGVectorStore:
-    """Connect to the configured PGVector table, creating it when absent."""
+    """Connect to an existing PGVector table without modifying it."""
     settings = settings or PGVectorSettings.from_env()
-    engine = PGEngine.from_connection_string(
-        url=_to_pg_engine_url(settings.database_url)
-    )
-
-    if not recreate_table:
-        try:
-            return _open_vector_store(engine, embedding_model, settings)
-        except ValueError as error:
-            missing_table_error = f"Id column, {ID_COLUMN}, does not exist."
-            if str(error) != missing_table_error:
-                raise
-
-    vector_size = get_embedding_dimension(embedding_model)
-    engine.init_vectorstore_table(
-        table_name=settings.table_name,
-        vector_size=vector_size,
-        schema_name=settings.schema_name,
-        id_column=Column(ID_COLUMN, "TEXT", nullable=False),
-        overwrite_existing=recreate_table,
-    )
-    return _open_vector_store(engine, embedding_model, settings)
-
-
-def index_chunks(
-    vector_store: PGVectorStore,
-    chunks: list[DocumentChunk],
-    batch_size: int,
-) -> list[str]:
-    """Embed and upsert document chunks into PGVector in batches."""
-    if batch_size < 1:
-        raise ValueError("batch_size must be at least 1")
-
-    indexed_ids: list[str] = []
-
-    for start in range(0, len(chunks), batch_size):
-        batch = chunks[start : start + batch_size]
-        documents = chunks_to_documents(batch)
-        chunk_ids = [chunk.chunk_id for chunk in batch]
-        indexed_ids.extend(
-            vector_store.add_documents(documents=documents, ids=chunk_ids)
-        )
-
-    return indexed_ids
+    engine = create_pg_engine(settings)
+    return open_vector_store(engine, embedding_model, settings)

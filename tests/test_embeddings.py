@@ -2,7 +2,7 @@ import os
 import unittest
 from unittest.mock import Mock, patch
 
-from app.indexing.embeddings import (
+from app.core.embeddings import (
     EmbeddingSettings,
     create_embedding_model,
     get_embedding_dimension,
@@ -43,7 +43,7 @@ class EmbeddingSettingsTests(unittest.TestCase):
 
 
 class EmbeddingModelTests(unittest.TestCase):
-    @patch("app.indexing.embeddings.HuggingFaceEmbeddings")
+    @patch("app.core.embeddings.HuggingFaceEmbeddings")
     def test_creates_normalized_hugging_face_embeddings(
         self,
         embedding_class: Mock,
