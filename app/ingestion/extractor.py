@@ -112,7 +112,6 @@ def _extract_json(file_path: Path) -> str:
         indent=2,
     )
 
-
 def extract_content(file_path: str | Path) -> str:
     path = Path(file_path)
 
