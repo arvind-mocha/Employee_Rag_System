@@ -1,1 +1,22 @@
+services:
+  pgvector:
+    image: pgvector/pgvector:pg16
+    container_name: employee-rag-pgvector
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-employee_rag}
+      POSTGRES_USER: ${POSTGRES_USER:-employee_rag}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-employee_rag_dev}
+    ports:
+      - "${POSTGRES_PORT:-6024}:5432"
+    volumes:
+      - pgvector_data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U ${POSTGRES_USER:-employee_rag} -d ${POSTGRES_DB:-employee_rag}
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
+volumes:
+  pgvector_data:

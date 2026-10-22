@@ -1,0 +1,78 @@
+import os
+import unittest
+from unittest.mock import Mock, patch
+
+from app.indexing.embeddings import (
+    EmbeddingSettings,
+    create_embedding_model,
+    get_embedding_dimension,
+)
+
+
+class EmbeddingSettingsTests(unittest.TestCase):
+    @patch.dict(
+        os.environ,
+        {
+            "EMBEDDING_MODEL": "sentence-transformers/test-model",
+            "EMBEDDING_BATCH_SIZE": "16",
+            "EMBEDDING_DEVICE": "cpu",
+        },
+    )
+    def test_loads_embedding_settings_from_environment(self) -> None:
+        settings = EmbeddingSettings.from_env()
+
+        self.assertEqual(
+            settings,
+            EmbeddingSettings(
+                model_name="sentence-transformers/test-model",
+                batch_size=16,
+                device="cpu",
+            ),
+        )
+
+    @patch.dict(
+        os.environ,
+        {
+            "EMBEDDING_MODEL": "sentence-transformers/test-model",
+            "EMBEDDING_BATCH_SIZE": "0",
+        },
+    )
+    def test_rejects_non_positive_batch_size(self) -> None:
+        with self.assertRaisesRegex(ValueError, "must be at least 1"):
+            EmbeddingSettings.from_env()
+
+
+class EmbeddingModelTests(unittest.TestCase):
+    @patch("app.indexing.embeddings.HuggingFaceEmbeddings")
+    def test_creates_normalized_hugging_face_embeddings(
+        self,
+        embedding_class: Mock,
+    ) -> None:
+        settings = EmbeddingSettings(
+            model_name="sentence-transformers/test-model",
+            batch_size=8,
+            device="cpu",
+        )
+
+        create_embedding_model(settings)
+
+        embedding_class.assert_called_once_with(
+            model="sentence-transformers/test-model",
+            model_kwargs={"device": "cpu"},
+            encode_kwargs={
+                "batch_size": 8,
+                "normalize_embeddings": True,
+            },
+            query_encode_kwargs={"normalize_embeddings": True},
+            show_progress=False,
+        )
+
+    def test_reads_embedding_dimension_from_probe_vector(self) -> None:
+        embedding_model = Mock()
+        embedding_model.embed_query.return_value = [0.1, 0.2, 0.3]
+
+        self.assertEqual(get_embedding_dimension(embedding_model), 3)
+
+
+if __name__ == "__main__":
+    unittest.main()
