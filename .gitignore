@@ -208,6 +208,8 @@ cython_debug/
 tempCodeRunnerFile.py
 
 # Generated ingestion files
+/data/
+/structured_data/
 /temp_data/
 
 # Ruff stuff:
