@@ -1,4 +1,4 @@
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 import re
 import unicodedata
@@ -14,6 +14,14 @@ SUPPORTED_EXTENSIONS = {
     ".md",
     ".markdown",
 }
+PROGRESS_BAR_WIDTH = 40
+
+
+def _display_progress(label: str, completed: int, total: int) -> None:
+    filled_width = round(PROGRESS_BAR_WIDTH * completed / total)
+    bar = "█" * filled_width + "░" * (PROGRESS_BAR_WIDTH - filled_width)
+    line_ending = "\n" if completed == total else ""
+    print(f"\r{label} [{bar}]", end=line_ending, flush=True)
 
 
 def clean_text(content: str) -> str:
@@ -94,7 +102,11 @@ def clean_documents(
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         for start in range(0, len(source_files), batch_size):
             batch = source_files[start : start + batch_size]
-            futures = [
+            batch_number = (start // batch_size) + 1
+            batch_label = f"Cleaning documents - Batch {batch_number}"
+            completed_in_batch = 0
+            _display_progress(batch_label, 0, len(batch))
+            futures = {
                 executor.submit(
                     _clean_document,
                     source_file,
@@ -103,7 +115,16 @@ def clean_documents(
                     overwrite,
                 )
                 for source_file in batch
-            ]
-            cleaned_files.extend(future.result() for future in futures)
+            }
 
+            for future in as_completed(futures):
+                cleaned_files.append(future.result())
+                completed_in_batch += 1
+                _display_progress(
+                    batch_label,
+                    completed_in_batch,
+                    len(batch),
+                )
+
+    cleaned_files.sort()
     return cleaned_files
