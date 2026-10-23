@@ -1,8 +1,10 @@
 """HTTP handlers for explicitly requested RAG evaluation operations."""
 
 import logging
+from pathlib import Path
+from typing import Annotated
 
-from fastapi import HTTPException, status
+from fastapi import File, Form, HTTPException, UploadFile, status
 
 from app.api import config
 from app.api.llm import LLMConfigurationError, LLMProviderRequestError
@@ -12,10 +14,12 @@ from app.api.schemas.evaluation import (
     GenerateEvaluationDatasetResponse,
     RunEvaluationRequest,
     RunEvaluationResponse,
+    UploadEvaluationDatasetResponse,
 )
 from app.evaluation.dataset import (
     EvaluationDatasetError,
     dataset_sha256,
+    parse_dataset_jsonl,
     read_dataset,
     validate_dataset_name,
     write_dataset,
@@ -25,6 +29,7 @@ from app.evaluation.engine import (
     generate_ground_truth_records,
     run_evaluation,
 )
+from app.evaluation.models import ReviewStatus
 
 
 logger = logging.getLogger(__name__)
@@ -94,6 +99,66 @@ def generate_evaluation_dataset(
             record.reference_usage for record in records
         ),
         review_required=True,
+    )
+
+
+async def upload_evaluation_dataset(
+    dataset_file: Annotated[
+        UploadFile,
+        File(description="A validated ground-truth dataset in JSONL format"),
+    ],
+    dataset_name: Annotated[str | None, Form()] = None,
+    overwrite: Annotated[bool, Form()] = False,
+) -> UploadEvaluationDatasetResponse:
+    """Validate and store a user-provided ground-truth JSONL dataset."""
+    uploaded_filename = Path(dataset_file.filename or "").name
+    try:
+        if Path(uploaded_filename).suffix.lower() != ".jsonl":
+            raise HTTPException(
+                status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+                detail="The evaluation dataset must be a .jsonl file.",
+            )
+        content = await dataset_file.read(
+            config.MAX_EVALUATION_DATASET_SIZE + 1
+        )
+    finally:
+        await dataset_file.close()
+
+    if len(content) > config.MAX_EVALUATION_DATASET_SIZE:
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            detail="The evaluation dataset exceeds the 10 MB upload limit.",
+        )
+
+    try:
+        normalized_name = validate_dataset_name(
+            dataset_name or Path(uploaded_filename).stem
+        )
+        records = parse_dataset_jsonl(
+            content,
+            maximum_records=config.MAX_EVALUATION_RECORDS,
+        )
+        destination = write_dataset(
+            normalized_name,
+            records,
+            overwrite=overwrite,
+        )
+    except FileExistsError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(error),
+        ) from error
+    except EvaluationDatasetError as error:
+        raise _dataset_request_error(error) from error
+
+    return UploadEvaluationDatasetResponse(
+        dataset_name=normalized_name,
+        dataset_file=str(destination.relative_to(config.PROJECT_ROOT)),
+        dataset_sha256=dataset_sha256(normalized_name),
+        record_count=len(records),
+        review_required=any(
+            record.review_status != ReviewStatus.APPROVED for record in records
+        ),
     )
 
 

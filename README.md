@@ -37,6 +37,24 @@ Start the Redis-backed evaluation worker in another terminal:
 uv run employee-rag-worker
 ```
 
+## Run the frontend
+
+The React/Vite application lives in `frontend/`. Keep the API running on port
+`8000`; the Vite development server proxies `/api` requests to it.
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Open `http://localhost:5173`. User mode provides a focused question-and-answer
+experience. Developer mode adds model and retrieval controls, retrieved chunks,
+request diagnostics, dataset generation, and on-demand evaluation dashboards.
+
+For evaluation jobs, PostgreSQL and Redis must be available and the background
+worker shown above must be running.
+
 Ingestion locking and status are stored in Redis, so they survive API restarts
 and are shared across API workers. Redis is not used for document or vector
 storage; those remain in PostgreSQL/PGVector.
@@ -160,6 +178,24 @@ curl -X POST 'http://localhost:8000/api/v1/evaluations/datasets/generate' \
 ```
 
 Set `overwrite` to `true` only when intentionally regenerating a dataset.
+
+You can also upload an existing ground-truth JSONL dataset. The uploaded records
+must use the same schema as generated records; the API validates every record,
+its evidence hashes, and the `.jsonl` extension before saving it. If
+`dataset_name` is omitted, the uploaded filename is used.
+
+```bash
+curl -X POST \
+  'http://localhost:8000/api/v1/evaluations/datasets/upload' \
+  -F 'dataset_file=@employee-policies.jsonl;type=application/x-ndjson' \
+  -F 'dataset_name=employee-policies' \
+  -F 'overwrite=false'
+```
+
+Uploads are limited to 10 MB and 100 records. Structural validation cannot
+confirm that reference answers are factually correct or representative. A poor,
+incorrect, or unsuitable ground-truth dataset will produce unreliable evaluation
+results, so review user-provided and generated datasets before relying on scores.
 
 For background generation, submit the same body to the asynchronous endpoint:
 

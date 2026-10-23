@@ -249,3 +249,11 @@ models/cache/
 *.swp
 *.swo
 *~
+
+# Frontend dependencies and local Vite files
+node_modules/
+*.tsbuildinfo
+
+# The frontend's source library is code, not Python packaging output.
+!frontend/src/lib/
+!frontend/src/lib/**

@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
@@ -14,6 +15,7 @@ from app.evaluation.models import (
     GroundTruthRecord,
     RetrievalConfiguration,
 )
+from app.evaluation.dataset import evidence_fingerprint
 
 
 def ground_truth_record() -> GroundTruthRecord:
@@ -24,7 +26,7 @@ def ground_truth_record() -> GroundTruthRecord:
         reference_answer="The documents do not contain enough information.",
         required_facts=[],
         relevant_evidence=[],
-        evidence_fingerprint="fingerprint",
+        evidence_fingerprint=evidence_fingerprint([]),
         generated_at=datetime.now(timezone.utc),
         reference_provider=LLMProvider.OPENAI,
         reference_model="reference-model",
@@ -125,6 +127,103 @@ class EvaluationApiTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 422)
+
+    def test_uploads_a_valid_jsonl_dataset_under_the_requested_name(self) -> None:
+        with TemporaryDirectory() as directory:
+            project_root = Path(directory)
+            evaluation_directory = project_root / "evaluation_data"
+            content = ground_truth_record().model_dump_json().encode("utf-8")
+            with (
+                patch("app.api.config.PROJECT_ROOT", project_root),
+                patch(
+                    "app.api.config.EVALUATION_DATA_DIRECTORY",
+                    evaluation_directory,
+                ),
+            ):
+                response = self.client.post(
+                    "/api/v1/evaluations/datasets/upload",
+                    data={"dataset_name": "team-baseline"},
+                    files={
+                        "dataset_file": (
+                            "original.jsonl",
+                            content,
+                            "application/x-ndjson",
+                        )
+                    },
+                )
+
+            self.assertEqual(response.status_code, 201)
+            self.assertEqual(response.json()["dataset_name"], "team-baseline")
+            self.assertEqual(response.json()["record_count"], 1)
+            self.assertTrue(response.json()["review_required"])
+            self.assertTrue(
+                (evaluation_directory / "team-baseline.jsonl").is_file()
+            )
+
+    def test_upload_uses_the_jsonl_filename_when_name_is_omitted(self) -> None:
+        with TemporaryDirectory() as directory:
+            project_root = Path(directory)
+            evaluation_directory = project_root / "evaluation_data"
+            content = ground_truth_record().model_dump_json().encode("utf-8")
+            with (
+                patch("app.api.config.PROJECT_ROOT", project_root),
+                patch(
+                    "app.api.config.EVALUATION_DATA_DIRECTORY",
+                    evaluation_directory,
+                ),
+            ):
+                response = self.client.post(
+                    "/api/v1/evaluations/datasets/upload",
+                    files={
+                        "dataset_file": (
+                            "benefits-tests.jsonl",
+                            content,
+                            "application/x-ndjson",
+                        )
+                    },
+                )
+
+            self.assertEqual(response.status_code, 201)
+            self.assertEqual(response.json()["dataset_name"], "benefits-tests")
+
+    def test_rejects_an_invalid_uploaded_dataset_without_storing_it(self) -> None:
+        with TemporaryDirectory() as directory:
+            project_root = Path(directory)
+            evaluation_directory = project_root / "evaluation_data"
+            with (
+                patch("app.api.config.PROJECT_ROOT", project_root),
+                patch(
+                    "app.api.config.EVALUATION_DATA_DIRECTORY",
+                    evaluation_directory,
+                ),
+            ):
+                response = self.client.post(
+                    "/api/v1/evaluations/datasets/upload",
+                    files={
+                        "dataset_file": (
+                            "broken.jsonl",
+                            b'{"question": "Missing ground truth fields"}\n',
+                            "application/x-ndjson",
+                        )
+                    },
+                )
+
+            self.assertEqual(response.status_code, 422)
+            self.assertFalse(evaluation_directory.exists())
+
+    def test_rejects_a_non_jsonl_dataset_upload(self) -> None:
+        response = self.client.post(
+            "/api/v1/evaluations/datasets/upload",
+            files={
+                "dataset_file": (
+                    "dataset.json",
+                    b"{}",
+                    "application/json",
+                )
+            },
+        )
+
+        self.assertEqual(response.status_code, 415)
 
 
 if __name__ == "__main__":
