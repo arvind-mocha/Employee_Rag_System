@@ -215,6 +215,41 @@ def write_dataset(
     return destination
 
 
+def parse_dataset_jsonl(
+    content: bytes,
+    *,
+    maximum_records: int | None = None,
+) -> list[GroundTruthRecord]:
+    """Validate uploaded JSONL before it is allowed into dataset storage."""
+    try:
+        text = content.decode("utf-8-sig")
+    except UnicodeDecodeError as error:
+        raise EvaluationDatasetError(
+            "the evaluation dataset must be UTF-8 encoded"
+        ) from error
+
+    records = []
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        if not line.strip():
+            continue
+        if maximum_records is not None and len(records) >= maximum_records:
+            raise EvaluationDatasetError(
+                f"the evaluation dataset cannot contain more than "
+                f"{maximum_records} records"
+            )
+        try:
+            record = GroundTruthRecord.model_validate_json(line)
+            _validate_record_integrity(record, line_number)
+            records.append(record)
+        except (ValidationError, json.JSONDecodeError) as error:
+            raise EvaluationDatasetError(
+                f"invalid JSONL record at line {line_number}: {error}"
+            ) from error
+    if not records:
+        raise EvaluationDatasetError("the evaluation dataset is empty")
+    return records
+
+
 def read_dataset(
     dataset_name: str,
     *,
@@ -223,23 +258,7 @@ def read_dataset(
     source = dataset_path(dataset_name, directory)
     if not source.is_file():
         raise FileNotFoundError(f"evaluation dataset not found: {source.name}")
-
-    records = []
-    with source.open(encoding="utf-8") as input_file:
-        for line_number, line in enumerate(input_file, start=1):
-            if not line.strip():
-                continue
-            try:
-                record = GroundTruthRecord.model_validate_json(line)
-                _validate_record_integrity(record, line_number)
-                records.append(record)
-            except (ValidationError, json.JSONDecodeError) as error:
-                raise EvaluationDatasetError(
-                    f"invalid JSONL record at line {line_number}: {error}"
-                ) from error
-    if not records:
-        raise EvaluationDatasetError("the evaluation dataset is empty")
-    return records
+    return parse_dataset_jsonl(source.read_bytes())
 
 
 def dataset_sha256(

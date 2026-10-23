@@ -7,6 +7,7 @@ from app.api.controllers.data import upload_data
 from app.api.controllers.evaluation import (
     generate_evaluation_dataset,
     run_evaluation_on_demand,
+    upload_evaluation_dataset,
 )
 from app.api.controllers.evaluation_jobs import (
     enqueue_dataset_generation,
@@ -19,6 +20,7 @@ from app.api.schemas.data import DataUploadResponse
 from app.api.schemas.evaluation import (
     GenerateEvaluationDatasetResponse,
     RunEvaluationResponse,
+    UploadEvaluationDatasetResponse,
 )
 from app.api.schemas.ingestion import IngestionStartResponse
 from app.api.schemas.jobs import EvaluationJobAccepted
@@ -54,6 +56,14 @@ POST_ROUTES = (
         path="/evaluations/datasets/generate",
         endpoint=generate_evaluation_dataset,
         response_model=GenerateEvaluationDatasetResponse,
+        status_code=HTTPStatus.CREATED,
+        tags=("evaluations",),
+    ),
+    ApiRoute(
+        name="upload_evaluation_dataset",
+        path="/evaluations/datasets/upload",
+        endpoint=upload_evaluation_dataset,
+        response_model=UploadEvaluationDatasetResponse,
         status_code=HTTPStatus.CREATED,
         tags=("evaluations",),
     ),

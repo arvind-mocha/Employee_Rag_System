@@ -66,6 +66,14 @@ class GenerateEvaluationDatasetResponse(BaseModel):
     review_required: bool
 
 
+class UploadEvaluationDatasetResponse(BaseModel):
+    dataset_name: str
+    dataset_file: str
+    dataset_sha256: str
+    record_count: int
+    review_required: bool
+
+
 class RunEvaluationRequest(EvaluationRetrievalRequest):
     dataset_name: str
     answer_providers: list[LLMProvider] = Field(min_length=1, max_length=4)

@@ -10,6 +10,7 @@ from app.evaluation.dataset import (
     dataset_sha256,
     evidence_fingerprint,
     ground_truth_status,
+    parse_dataset_jsonl,
     read_dataset,
     snapshot_evidence,
     text_sha256,
@@ -98,6 +99,14 @@ class EvaluationDatasetTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "hash mismatch"):
                 read_dataset("employee-policies", directory=root)
+
+    def test_uploaded_jsonl_must_be_utf8_and_respect_the_record_limit(self) -> None:
+        with self.assertRaisesRegex(ValueError, "UTF-8"):
+            parse_dataset_jsonl(b"\xff")
+
+        record = ground_truth_record().model_dump_json().encode("utf-8")
+        with self.assertRaisesRegex(ValueError, "more than 1 records"):
+            parse_dataset_jsonl(record + b"\n" + record, maximum_records=1)
 
     def test_marks_ground_truth_stale_when_indexed_source_changes(self) -> None:
         with TemporaryDirectory() as directory:
