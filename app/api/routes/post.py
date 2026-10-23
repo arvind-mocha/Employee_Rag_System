@@ -2,13 +2,13 @@
 
 from http import HTTPStatus
 
+from app.api.controllers.answer import answer_question
 from app.api.controllers.data import upload_data
 from app.api.controllers.ingestion import start_ingestion
-from app.api.controllers.retrieval import retrieve_chunks
 from app.api.routes.definition import ApiRoute
+from app.api.schemas.answer import AnswerResponse
 from app.api.schemas.data import DataUploadResponse
 from app.api.schemas.ingestion import IngestionStartResponse
-from app.api.schemas.retrieval import RetrievalResponse
 
 
 POST_ROUTES = (
@@ -29,11 +29,11 @@ POST_ROUTES = (
         tags=("ingestion",),
     ),
     ApiRoute(
-        name="retrieve_chunks",
-        path="/retrieval/search",
-        endpoint=retrieve_chunks,
-        response_model=RetrievalResponse,
+        name="answer_question",
+        path="/answers/generate",
+        endpoint=answer_question,
+        response_model=AnswerResponse,
         status_code=HTTPStatus.OK,
-        tags=("retrieval",),
+        tags=("answers",),
     ),
 )
