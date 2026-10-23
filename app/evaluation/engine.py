@@ -23,6 +23,7 @@ from app.api.llm import (
     generate_grounded_answer,
     invoke_chat_model,
 )
+from app.api.llm_usage import LLMUsage, summarize_llm_usage
 from app.evaluation.dataset import (
     dataset_sha256,
     evidence_fingerprint,
@@ -185,6 +186,7 @@ def generate_ground_truth_records(
                 generated_at=datetime.now(timezone.utc),
                 reference_provider=generated.provider,
                 reference_model=generated.model_name,
+                reference_usage=generated.usage,
                 retrieval=retrieval,
                 review_status=ReviewStatus.MACHINE_GENERATED,
             )
@@ -257,7 +259,9 @@ def _failed_case(
     grading_ms: float = 0.0,
     answer: str | None = None,
     answer_model: str | None = None,
+    answer_usage: LLMUsage | None = None,
     judge_model: str | None = None,
+    judge_usage: LLMUsage | None = None,
     warnings: list[str] | None = None,
     error: Exception,
 ) -> EvaluationCaseResult:
@@ -275,6 +279,9 @@ def _failed_case(
         judge_provider=judge_provider,
         judge_model=judge_model,
         answer=answer,
+        answer_usage=answer_usage,
+        judge_usage=judge_usage,
+        usage=summarize_llm_usage([answer_usage, judge_usage]),
         retrieved_chunk_ids=[
             chunk.chunk_id or text_sha256(chunk.content) for chunk in chunks
         ],
@@ -384,7 +391,9 @@ def evaluate_record(
             grading_ms=grading_ms,
             answer=generated_answer.answer,
             answer_model=generated_answer.model_name,
+            answer_usage=generated_answer.usage,
             judge_model=judged.model_name if judged is not None else None,
+            judge_usage=judged.usage if judged is not None else None,
             warnings=warnings,
             error=error,
         )
@@ -447,6 +456,11 @@ def evaluate_record(
         judge_provider=judged.provider,
         judge_model=judged.model_name,
         answer=generated_answer.answer,
+        answer_usage=generated_answer.usage,
+        judge_usage=judged.usage,
+        usage=summarize_llm_usage(
+            [generated_answer.usage, judged.usage]
+        ),
         retrieved_chunk_ids=[
             chunk.chunk_id or text_sha256(chunk.content) for chunk in chunks
         ],
@@ -557,6 +571,11 @@ def _summary(
         average_latency_ms=_mean(
             result.timing.total_ms for result in provider_results
         ),
+        usage=summarize_llm_usage(
+            usage
+            for result in provider_results
+            for usage in (result.answer_usage, result.judge_usage)
+        ),
     )
 
 
@@ -588,6 +607,11 @@ def run_evaluation(
         dataset_sha256=dataset_sha256(dataset_name),
         generated_at=datetime.now(timezone.utc),
         judge_provider=judge_provider,
+        usage=summarize_llm_usage(
+            usage
+            for result in results
+            for usage in (result.answer_usage, result.judge_usage)
+        ),
         summaries=[
             _summary(provider, results) for provider in answer_providers
         ],

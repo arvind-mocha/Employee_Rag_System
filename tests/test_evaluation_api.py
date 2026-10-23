@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from app.api import config
 from app.api.llm import LLMProvider
+from app.api.llm_usage import LLMUsage
 from app.api.main import app
 from app.evaluation.models import (
     EvaluationRun,
@@ -27,6 +28,14 @@ def ground_truth_record() -> GroundTruthRecord:
         generated_at=datetime.now(timezone.utc),
         reference_provider=LLMProvider.OPENAI,
         reference_model="reference-model",
+        reference_usage=LLMUsage(
+            input_tokens=100,
+            output_tokens=20,
+            total_tokens=120,
+            token_count_source="provider",
+            estimated_cost_usd=0.004,
+            pricing_source="built_in",
+        ),
         retrieval=RetrievalConfiguration(),
     )
 
@@ -64,6 +73,8 @@ class EvaluationApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 201)
         self.assertTrue(response.json()["review_required"])
         self.assertEqual(response.json()["record_count"], 1)
+        self.assertEqual(response.json()["usage"]["llm_calls"], 1)
+        self.assertEqual(response.json()["usage"]["estimated_cost_usd"], 0.004)
         generate_records.assert_called_once()
 
     @patch("app.api.controllers.evaluation.run_evaluation")
@@ -96,6 +107,7 @@ class EvaluationApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["run_id"], "run-1")
+        self.assertEqual(response.json()["usage"]["llm_calls"], 0)
         providers = run_evaluation.call_args.args[2]
         self.assertEqual(
             providers,

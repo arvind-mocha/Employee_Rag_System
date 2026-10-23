@@ -6,6 +6,7 @@ from fastapi import HTTPException, status
 
 from app.api import config
 from app.api.llm import LLMConfigurationError, LLMProviderRequestError
+from app.api.llm_usage import summarize_llm_usage
 from app.api.schemas.evaluation import (
     GenerateEvaluationDatasetRequest,
     GenerateEvaluationDatasetResponse,
@@ -89,6 +90,9 @@ def generate_evaluation_dataset(
         record_count=len(records),
         reference_provider=records[0].reference_provider,
         reference_model=records[0].reference_model,
+        usage=summarize_llm_usage(
+            record.reference_usage for record in records
+        ),
         review_required=True,
     )
 

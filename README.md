@@ -3,6 +3,26 @@
 FastAPI service for employee-document ingestion, retrieval, grounded answers,
 and explicitly requested RAG evaluations.
 
+## Start PostgreSQL and Redis
+
+PostgreSQL/PGVector and Redis run as separate services in the same Compose
+stack:
+
+```bash
+docker compose up -d
+docker compose ps
+```
+
+The local defaults are:
+
+```dotenv
+DATABASE_URL=postgresql://employee_rag:employee_rag_dev@localhost:6024/employee_rag
+REDIS_URL=redis://localhost:6379/0
+REDIS_EVALUATION_QUEUE=employee-rag-evaluations
+REDIS_JOB_TIMEOUT_SECONDS=1800
+REDIS_RESULT_TTL_SECONDS=86400
+```
+
 ## Run the API
 
 ```bash
@@ -10,6 +30,67 @@ uv run uvicorn app.api.main:app --reload
 ```
 
 The API is available at `http://localhost:8000/api/v1`.
+
+Start the Redis-backed evaluation worker in another terminal:
+
+```bash
+uv run employee-rag-worker
+```
+
+Ingestion locking and status are stored in Redis, so they survive API restarts
+and are shared across API workers. Redis is not used for document or vector
+storage; those remain in PostgreSQL/PGVector.
+
+## LLM token usage and approximate cost
+
+Every successful API operation that invokes an LLM returns usage information:
+
+- `POST /answers/generate`: one `usage` object for the answer call
+- `POST /evaluations/datasets/generate`: aggregate `usage` for all reference calls
+- `POST /evaluations/run`: run-level and provider-level aggregate `usage`, plus
+  `answer_usage`, `judge_usage`, and combined `usage` for every result
+
+Example:
+
+```json
+{
+  "input_tokens": 1000,
+  "cached_input_tokens": 0,
+  "cache_creation_input_tokens": 0,
+  "output_tokens": 120,
+  "total_tokens": 1120,
+  "token_count_source": "provider",
+  "input_cost_per_million_usd": 10.0,
+  "cached_input_cost_per_million_usd": 1.0,
+  "cache_creation_cost_per_million_usd": 12.5,
+  "output_cost_per_million_usd": 50.0,
+  "estimated_cost_usd": 0.016,
+  "pricing_source": "built_in",
+  "currency": "USD"
+}
+```
+
+Provider token counts are used when available. Otherwise, the API estimates token
+counts from text length and labels `token_count_source` as `estimated`. Built-in
+standard API rates are included for the configured `gpt-6-astra`,
+`claude-opus-5-5`, and `grok-4.7` model IDs.
+
+Hugging Face `HF_PROVIDER=auto` pricing depends on the provider selected at
+runtime. Set these variables to return an estimated HF cost, or use the same
+provider-prefixed variables to override any built-in rate:
+
+```dotenv
+HF_INPUT_COST_PER_MILLION_USD=
+HF_OUTPUT_COST_PER_MILLION_USD=
+HF_CACHED_INPUT_COST_PER_MILLION_USD=
+HF_CACHE_CREATION_COST_PER_MILLION_USD=
+```
+
+Replace `HF` with `OPENAI`, `ANTHROPIC`, or `GROK` for another provider.
+When pricing is unavailable, token usage is still returned, while
+`estimated_cost_usd` is `null` and aggregate results increment `unpriced_calls`.
+Costs are estimates and may differ from provider invoices due to pricing tiers,
+regional rates, long-context rates, credits, rounding, or provider changes.
 
 ## On-demand evaluation
 
@@ -80,6 +161,28 @@ curl -X POST 'http://localhost:8000/api/v1/evaluations/datasets/generate' \
 
 Set `overwrite` to `true` only when intentionally regenerating a dataset.
 
+For background generation, submit the same body to the asynchronous endpoint:
+
+```bash
+curl -X POST \
+  'http://localhost:8000/api/v1/evaluations/datasets/generate/async' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "dataset_name": "employee-policies",
+    "questions": ["How many vacation days do employees receive?"],
+    "reference_provider": "openai"
+  }'
+```
+
+It returns HTTP `202` with a `job_id` and `status_url`. Poll that URL:
+
+```bash
+curl 'http://localhost:8000/api/v1/evaluations/jobs/JOB_ID'
+```
+
+Job states are `queued`, `running`, `completed`, or `failed`. Successful jobs
+return the normal dataset-generation response inside `result`.
+
 ### 3. Run scores on demand
 
 One request can compare several answer providers against the same ground truth.
@@ -103,6 +206,11 @@ curl -X POST 'http://localhost:8000/api/v1/evaluations/run' \
 Supported provider names are `huggingface`, `openai`, `anthropic`, and `grok`.
 Use `record_ids` in the request to evaluate only selected JSONL records.
 
+The same request can be queued at
+`POST /api/v1/evaluations/run/async`. Both asynchronous endpoints require the
+`employee-rag-worker` process to be running. The original endpoints remain
+synchronous for compatibility.
+
 ### Returned scores
 
 Each result includes:
@@ -114,6 +222,7 @@ Each result includes:
 - Behavior: abstention correctness, unsupported claims, and missing facts
 - Similarity: lexical and local-embedding semantic similarity
 - Operations: retrieval, generation, grading, and total latency
+- Cost: per-call token usage and approximate USD cost, with run and provider totals
 - Aggregates: averages, pass rate, provider errors, stale references, and
   unreviewed-reference counts
 

@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from app.api.llm import GeneratedAnswer, GeneratedText, LLMProvider
+from app.api.llm_usage import LLMUsage
 from app.evaluation.dataset import text_sha256
 from app.evaluation.engine import (
     evaluate_record,
@@ -28,6 +29,19 @@ def retrieved_chunk() -> RetrievedChunk:
         source_type="markdown",
         section="Vacation",
         chunk_index=0,
+    )
+
+
+def llm_usage(cost: float) -> LLMUsage:
+    return LLMUsage(
+        input_tokens=100,
+        output_tokens=20,
+        total_tokens=120,
+        token_count_source="provider",
+        input_cost_per_million_usd=1.0,
+        output_cost_per_million_usd=2.0,
+        estimated_cost_usd=cost,
+        pricing_source="built_in",
     )
 
 
@@ -74,6 +88,7 @@ class GroundTruthGenerationTests(unittest.TestCase):
             ),
             LLMProvider.OPENAI,
             "reference-model",
+            llm_usage(0.001),
         )
 
         records = generate_ground_truth_records(
@@ -88,6 +103,7 @@ class GroundTruthGenerationTests(unittest.TestCase):
         self.assertEqual(len(records[0].retrieved_evidence), 1)
         self.assertEqual(records[0].relevant_evidence[0].chunk_id, "chunk-1")
         self.assertEqual(records[0].review_status, "machine_generated")
+        self.assertEqual(records[0].reference_usage.estimated_cost_usd, 0.001)
 
 
 class EvaluationEngineTests(unittest.TestCase):
@@ -111,6 +127,7 @@ class EvaluationEngineTests(unittest.TestCase):
             "Employees receive 15 vacation days annually [1].",
             LLMProvider.ANTHROPIC,
             "answer-model",
+            llm_usage(0.002),
         )
         invoke.return_value = GeneratedText(
             json.dumps(
@@ -129,6 +146,7 @@ class EvaluationEngineTests(unittest.TestCase):
             ),
             LLMProvider.OPENAI,
             "judge-model",
+            llm_usage(0.003),
         )
 
         result = evaluate_record(
@@ -145,6 +163,8 @@ class EvaluationEngineTests(unittest.TestCase):
         self.assertEqual(result.answer_scores.citation_validity, 1.0)
         self.assertEqual(result.retrieval_scores.recall_at_k, 1.0)
         self.assertEqual(result.retrieval_scores.source_recall_at_k, 1.0)
+        self.assertEqual(result.usage.llm_calls, 2)
+        self.assertAlmostEqual(result.usage.estimated_cost_usd, 0.005)
 
         with (
             patch(
@@ -169,6 +189,8 @@ class EvaluationEngineTests(unittest.TestCase):
         self.assertEqual(summary.evaluated, 1)
         self.assertEqual(summary.pass_rate, 1.0)
         self.assertEqual(summary.average_scores.overall, 1.0)
+        self.assertAlmostEqual(summary.usage.estimated_cost_usd, 0.005)
+        self.assertAlmostEqual(evaluation.usage.estimated_cost_usd, 0.005)
 
 
 if __name__ == "__main__":

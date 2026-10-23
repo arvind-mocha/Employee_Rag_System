@@ -19,6 +19,8 @@ dependencies = [
     "pypdf>=6.21.2",
     "python-docx>=1.2.0",
     "python-dotenv>=1.0,<2",
+    "redis>=5,<8",
+    "rq>=2,<3",
     "sentence-transformers>=3,<6",
 ]
 
@@ -26,6 +28,7 @@ dependencies = [
 employee-rag-system = "app.api.main:main"
 employee-rag-ingest = "app.ingestion.ingest:main"
 employee-rag-generate-eval = "app.evaluation.jsonl_generator:main"
+employee-rag-worker = "app.api.worker:main"
 
 [build-system]
 requires = ["uv_build>=0.12.13,<0.13.0"]

@@ -13,6 +13,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint
 from langchain_openai import ChatOpenAI
 
+from app.api.llm_usage import LLMUsage, calculate_llm_usage
 from app.api.prompts import build_answer_messages
 from app.retrieval.models import RetrievedChunk
 
@@ -131,6 +132,7 @@ class GeneratedAnswer:
     answer: str
     provider: LLMProvider
     model_name: str
+    usage: LLMUsage | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,6 +140,7 @@ class GeneratedText:
     text: str
     provider: LLMProvider
     model_name: str
+    usage: LLMUsage | None = None
 
 
 def select_provider(
@@ -281,6 +284,7 @@ def generate_grounded_answer(
         generated.text,
         generated.provider,
         generated.model_name,
+        generated.usage,
     )
 
 
@@ -306,4 +310,10 @@ def invoke_chat_model(
             provider,
             f"{provider.value} returned an empty response.",
         )
-    return GeneratedText(text, client.provider, client.model_name)
+    usage = calculate_llm_usage(
+        messages,
+        response,
+        client.provider.value,
+        client.model_name,
+    )
+    return GeneratedText(text, client.provider, client.model_name, usage)

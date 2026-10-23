@@ -3,6 +3,7 @@
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.api.llm import LLMProvider
+from app.api.llm_usage import LLMUsageSummary
 from app.evaluation.models import EvaluationRun, RetrievalConfiguration
 from app.retrieval.config import RETRIEVAL_SETTINGS
 
@@ -61,6 +62,7 @@ class GenerateEvaluationDatasetResponse(BaseModel):
     record_count: int
     reference_provider: LLMProvider
     reference_model: str
+    usage: LLMUsageSummary
     review_required: bool
 
 

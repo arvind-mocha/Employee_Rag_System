@@ -96,5 +96,6 @@ def answer_question(request: AnswerRequest) -> AnswerResponse:
         provider=generated.provider.value,
         model=generated.model_name,
         answer=generated.answer,
+        usage=generated.usage,
         sources=sources,
     )

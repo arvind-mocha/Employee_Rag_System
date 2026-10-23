@@ -7,6 +7,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, model_validator
 
 from app.api.llm import LLMProvider
+from app.api.llm_usage import LLMUsage, LLMUsageSummary, summarize_llm_usage
 
 
 class ReviewStatus(StrEnum):
@@ -60,6 +61,7 @@ class GroundTruthRecord(BaseModel):
     generated_at: datetime
     reference_provider: LLMProvider
     reference_model: str
+    reference_usage: LLMUsage | None = None
     retrieval: RetrievalConfiguration
     review_status: ReviewStatus = ReviewStatus.MACHINE_GENERATED
 
@@ -127,6 +129,11 @@ class EvaluationCaseResult(BaseModel):
     judge_provider: LLMProvider
     judge_model: str | None = None
     answer: str | None = None
+    answer_usage: LLMUsage | None = None
+    judge_usage: LLMUsage | None = None
+    usage: LLMUsageSummary = Field(
+        default_factory=lambda: summarize_llm_usage([])
+    )
     retrieved_chunk_ids: list[str]
     retrieved_sources: list[str]
     retrieval_scores: RetrievalScores | None = None
@@ -172,6 +179,9 @@ class ProviderEvaluationSummary(BaseModel):
     pass_rate: float | None
     average_scores: ScoreAverages
     average_latency_ms: float | None
+    usage: LLMUsageSummary = Field(
+        default_factory=lambda: summarize_llm_usage([])
+    )
 
 
 class EvaluationRun(BaseModel):
@@ -180,5 +190,8 @@ class EvaluationRun(BaseModel):
     dataset_sha256: str
     generated_at: datetime
     judge_provider: LLMProvider
+    usage: LLMUsageSummary = Field(
+        default_factory=lambda: summarize_llm_usage([])
+    )
     summaries: list[ProviderEvaluationSummary]
     results: list[EvaluationCaseResult]
