@@ -6,12 +6,17 @@ from app.retrieval.config import RETRIEVAL_SETTINGS
 
 
 class RetrievalRequest(BaseModel):
-    """Question submitted for semantic retrieval."""
+    """Question and retrieval options submitted as query parameters."""
 
     question: str = Field(
         min_length=1,
         max_length=RETRIEVAL_SETTINGS.maximum_question_length,
     )
+    semantic_search: bool = True
+    keyword_search: bool = True
+    query_rewriting: bool = False
+    reranking: bool = False
+    source_diversity: bool = False
 
     @field_validator("question")
     @classmethod

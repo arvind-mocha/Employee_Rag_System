@@ -1,8 +1,9 @@
 """HTTP handlers for retrieval operations."""
 
 import logging
+from typing import Annotated
 
-from fastapi import HTTPException, status
+from fastapi import HTTPException, Query, status
 
 from app.api.schemas.retrieval import (
     RetrievalRequest,
@@ -16,7 +17,9 @@ from app.retrieval.semantic_search import get_semantic_search
 logger = logging.getLogger(__name__)
 
 
-def retrieve_chunks(request: RetrievalRequest) -> RetrievalResponse:
+def retrieve_chunks(
+    request: Annotated[RetrievalRequest, Query()],
+) -> RetrievalResponse:
     """Return relevant chunks without generating an LLM answer."""
     try:
         chunks = get_semantic_search().search(request.question)
