@@ -1,29 +1,13 @@
 """Basic LangChain semantic retrieval using Hugging Face embeddings."""
 
 from functools import lru_cache
-from typing import Any
 
 from langchain_postgres import PGVectorStore
 
 from app.core.embeddings import create_embedding_model
 from app.core.vector_store import connect_vector_store
 from app.retrieval.config import RETRIEVAL_SETTINGS
-from app.retrieval.models import RetrievedChunk
-
-
-def _optional_text(value: Any) -> str | None:
-    if value is None:
-        return None
-    return str(value)
-
-
-def _optional_integer(value: Any) -> int | None:
-    if value is None:
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
+from app.retrieval.models import RetrievedChunk, document_to_retrieved_chunk
 
 
 class SemanticSearch:
@@ -32,35 +16,34 @@ class SemanticSearch:
     def __init__(self, vector_store: PGVectorStore) -> None:
         self._vector_store = vector_store
 
-    def search(self, question: str) -> list[RetrievedChunk]:
-        """Embed a question and return the configured number of chunks."""
+    def search(
+        self,
+        question: str,
+        limit: int | None = None,
+    ) -> list[RetrievedChunk]:
+        """Embed a question and return the most similar chunks."""
         normalized_question = question.strip()
         if not normalized_question:
             raise ValueError("question must not be empty")
 
+        result_limit = (
+            RETRIEVAL_SETTINGS.number_of_chunks if limit is None else limit
+        )
+        if result_limit < 1:
+            raise ValueError("limit must be at least 1")
+
         matches = self._vector_store.similarity_search_with_relevance_scores(
             query=normalized_question,
-            k=RETRIEVAL_SETTINGS.number_of_chunks,
+            k=result_limit,
         )
-
-        chunks: list[RetrievedChunk] = []
-        for document, score in matches:
-            metadata = document.metadata
-            chunks.append(
-                RetrievedChunk(
-                    content=document.page_content,
-                    relevance_score=round(
-                        float(score),
-                        RETRIEVAL_SETTINGS.score_decimal_places,
-                    ),
-                    chunk_id=_optional_text(document.id),
-                    source_file=_optional_text(metadata.get("source_file")),
-                    source_type=_optional_text(metadata.get("source_type")),
-                    section=_optional_text(metadata.get("section")),
-                    chunk_index=_optional_integer(metadata.get("chunk_index")),
-                )
+        return [
+            document_to_retrieved_chunk(
+                document,
+                score,
+                decimal_places=RETRIEVAL_SETTINGS.score_decimal_places,
             )
-        return chunks
+            for document, score in matches
+        ]
 
 
 @lru_cache(maxsize=1)

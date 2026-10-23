@@ -11,7 +11,11 @@ from app.api.schemas.retrieval import (
     RetrievedChunkResponse,
 )
 from app.retrieval.config import RETRIEVAL_SETTINGS
-from app.retrieval.semantic_search import get_semantic_search
+from app.retrieval.query_router import (
+    RetrievalOptions,
+    get_query_router,
+    rewrite_query,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -21,10 +25,20 @@ def retrieve_chunks(
     request: Annotated[RetrievalRequest, Query()],
 ) -> RetrievalResponse:
     """Return relevant chunks without generating an LLM answer."""
+    options = RetrievalOptions(
+        semantic_search=request.semantic_search,
+        keyword_search=request.keyword_search,
+        query_rewriting=request.query_rewriting,
+        reranking=request.reranking,
+        source_diversity=request.source_diversity,
+    )
     try:
-        chunks = get_semantic_search().search(request.question)
+        chunks = get_query_router().search(
+            request.question,
+            options,
+        )
     except Exception as error:
-        logger.exception("Semantic retrieval failed")
+        logger.exception("Document retrieval failed")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=(
@@ -45,8 +59,28 @@ def retrieve_chunks(
         )
         for chunk in chunks
     ]
+    applied_strategies = []
+    if options.semantic_search:
+        applied_strategies.append("semantic_search")
+    if options.keyword_search:
+        applied_strategies.append("keyword_search")
+    if options.semantic_search and options.keyword_search:
+        applied_strategies.append("hybrid_fusion")
+    if options.query_rewriting:
+        applied_strategies.append("query_rewriting")
+    if options.reranking:
+        applied_strategies.append("reranking")
+    if options.source_diversity:
+        applied_strategies.append("source_diversity")
+
     return RetrievalResponse(
         question=request.question,
+        effective_query=(
+            rewrite_query(request.question)
+            if options.query_rewriting
+            else request.question
+        ),
+        applied_strategies=applied_strategies,
         requested_chunks=RETRIEVAL_SETTINGS.number_of_chunks,
         returned_chunks=len(response_chunks),
         chunks=response_chunks,
