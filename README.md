@@ -1,248 +1,151 @@
 # Employee RAG System
 
-A full-stack, general-purpose Retrieval-Augmented Generation (RAG) application
-for employee and company knowledge.
+A full-stack Retrieval-Augmented Generation (RAG) application for employee and
+company knowledge.
 
-The system accepts structured and unstructured files in a ZIP archive, cleans
-and chunks the content, creates local embeddings, stores the resulting vectors
-in PostgreSQL with PGVector, and generates grounded answers through a selected
-LLM provider. It also includes an end-to-end evaluation workspace for measuring
-retrieval quality, answer quality, grounding, citations, latency, and estimated
-LLM cost.
+Upload structured and unstructured files in a ZIP archive, process them into a
+searchable knowledge base, and ask grounded questions through multiple LLM
+providers. The developer workspace can also evaluate the complete RAG pipeline,
+including retrieval quality, answer quality, grounding, citations, latency, and
+estimated model cost.
 
-This repository provides a deployment-ready foundation with persistent data
-services, health checks, secure provider credential storage, background jobs,
-and a production-buildable frontend. See [Deployment notes](#deployment-notes)
-before exposing it to an external network.
+## Features
 
-## What the application can do
+- Structured and unstructured document ingestion
+- Semantic, keyword, and hybrid retrieval
+- Query rewriting, reranking, and source diversification
+- Grounded answers with retrieved sources
+- Hugging Face, OpenAI, Anthropic, and xAI Grok support
+- Encrypted API-key storage with automatic expiry
+- End-to-end RAG evaluation and provider comparison
+- Token usage, approximate cost, and latency reporting
+- Separate user and developer interfaces
+- Chat locked until ingestion completes successfully
 
-- Upload one ZIP containing structured and unstructured company data.
-- Process PDF, DOCX, TXT, Markdown, CSV, JSON, and XLSX files.
-- Extract, clean, normalize, chunk, embed, and index uploaded content.
-- Search with semantic retrieval, PostgreSQL full-text keyword retrieval, or a
-  fused hybrid strategy.
-- Optionally rewrite queries, rerank results, and diversify results by source.
-- Generate answers grounded in retrieved employee documents.
-- Use Hugging Face, OpenAI, Anthropic, or xAI Grok models.
-- Store provider API keys encrypted in PostgreSQL with automatic expiration.
-- Track token usage and estimated model cost when pricing is available.
-- Generate or upload evaluation datasets.
-- Compare multiple answer providers against reviewed ground truth.
-- Measure retrieval, answer, citation, abstention, similarity, latency, and cost
-  metrics.
-- Detect stale evaluation data when the indexed corpus has changed.
-- Keep chat unavailable until the first ingestion run completes successfully.
+## Supported files
 
-## Supported data
+Files must be uploaded inside a `.zip` archive.
 
-Upload the files inside a `.zip` archive. Folder paths inside the archive are
-flattened before storage, so filenames must be unique.
-
-| Data type | Extensions | Processing |
+| Type | Extensions | Processing |
 | --- | --- | --- |
-| Unstructured | `.pdf`, `.docx`, `.txt`, `.md`, `.markdown` | Text extraction, cleaning, Markdown normalization, and section-aware chunking |
-| Structured | `.csv`, `.json`, `.xlsx` | Record or worksheet parsing followed by structured chunk generation |
+| Unstructured | `.pdf`, `.docx`, `.txt`, `.md`, `.markdown` | Extraction, cleaning, Markdown normalization, and chunking |
+| Structured | `.csv`, `.json`, `.xlsx` | Record and worksheet parsing followed by structured chunking |
 
-Default upload limits are:
-
-- 50 MB compressed ZIP size
-- 200 MB total uncompressed size
-- 1,000 files per archive
-- No silent overwriting of existing filenames
-
-These values are defined centrally in `app/api/config.py`.
+Default limits are 50 MB per ZIP, 200 MB after extraction, and 1,000 files.
+Existing filenames are never silently overwritten.
 
 ## Architecture
 
 ```mermaid
 flowchart TB
-    User[Employee or developer] --> UI[React + TypeScript frontend]
-    UI -->|REST /api/v1| API[FastAPI application]
+    User[Employee or developer] --> UI[React frontend]
+    UI -->|REST API| API[FastAPI]
 
-    subgraph Ingestion["Data ingestion"]
-        API -->|ZIP upload| Files[Local source-data directories]
-        API --> Runner[Background ingestion runner]
-        Runner --> Extract[Extract and clean]
-        Extract --> Chunk[Chunk structured and unstructured data]
-        Chunk --> Embed[Local Sentence Transformer embeddings]
-        Embed --> VectorDB[(PostgreSQL + PGVector)]
-        Runner -->|run status and lock| Redis[(Redis)]
-    end
+    API -->|ZIP upload| Files[Source files]
+    API --> Ingestion[Extraction, cleaning, and chunking]
+    Ingestion --> Embeddings[Local Sentence Transformer embeddings]
+    Embeddings --> DB[(PostgreSQL + PGVector)]
 
-    subgraph QA["Question answering"]
-        API --> Router[Query router]
-        Router --> Semantic[Semantic vector search]
-        Router --> Keyword[PostgreSQL full-text search]
-        Semantic --> VectorDB
-        Keyword --> VectorDB
-        Semantic --> Fusion[Deduplicate, fuse, rerank, diversify]
-        Keyword --> Fusion
-        Fusion --> LLM[Selected LLM provider]
-        LLM --> Answer[Grounded answer with sources]
-        Answer --> UI
-    end
+    API --> Router[Query router]
+    Router --> Semantic[Semantic search]
+    Router --> Keyword[Full-text keyword search]
+    Semantic --> DB
+    Keyword --> DB
+    Semantic --> Fusion[Fusion, reranking, and source diversity]
+    Keyword --> Fusion
+    Fusion --> LLM[Selected LLM provider]
+    LLM --> UI
 
-    subgraph Evaluation["RAG evaluation"]
-        UI --> EvalAPI[Evaluation API]
-        EvalAPI -->|enqueue| Redis
-        Redis --> Worker[RQ evaluation worker]
-        Worker --> Router
-        Worker --> LLM
-        Worker --> Judge[LLM judge and deterministic metrics]
-        Judge --> Results[Quality, latency, usage, and cost results]
-        Results -->|job result| Redis
-        Redis --> UI
-    end
+    API --> Redis[(Redis)]
+    Redis --> Worker[RQ evaluation worker]
+    Worker --> Router
+    Worker --> Judge[Evaluation and LLM judge]
+    Judge --> Redis
 
     API --> Credentials[Encrypted provider credentials]
-    Credentials --> VectorDB
+    Credentials --> DB
 ```
 
-### Main request flows
+## Technology
 
-1. **Ingestion:** ZIP upload → validation → extraction → cleaning → chunking →
-   local embeddings → PGVector index.
-2. **Chat:** question → selected retrieval strategies → optional reranking →
-   retrieved context → selected LLM → grounded answer and sources.
-3. **Evaluation:** reviewed questions and references → retrieval → provider
-   answers → judge and deterministic metrics → dashboard results.
-
-## Technology and tools
-
-| Area | Technology | Purpose |
+| Area | Tools | Purpose |
 | --- | --- | --- |
-| Backend language | Python 3.12+ | API, ingestion, retrieval, evaluation, and worker logic |
-| API framework | FastAPI, Uvicorn, Pydantic | Typed REST API, validation, serialization, and serving |
-| Frontend | React 19, TypeScript | User, developer, settings, data, and evaluation interfaces |
-| Frontend tooling | Vite | Development server, API proxy, and production build |
-| Routing and server state | React Router, TanStack Query | Client navigation, API caching, polling, and mutations |
-| UI and charts | Lucide React, Recharts | Icons and evaluation visualizations |
-| Relational database | PostgreSQL 16 | Credential metadata, full-text retrieval, and application data |
-| Vector database | PGVector | Embedding storage and semantic similarity search |
-| Cache and queue | Redis 7, RQ | Ingestion status, distributed locks, evaluation jobs, and results |
-| RAG integration | LangChain Core and LangChain PostgreSQL | Document models, provider integration, and PGVector access |
-| LLM integrations | LangChain OpenAI, Anthropic, and Hugging Face | OpenAI, xAI-compatible, Anthropic, and Hugging Face model clients |
-| Local embeddings | Sentence Transformers | Offline document and query embeddings |
-| Default embedding model | `sentence-transformers/all-MiniLM-L6-v2` | 384-dimensional local embeddings on CPU |
-| Document parsing | PyPDF, python-docx, openpyxl | PDF, DOCX, and XLSX extraction |
-| Security | `cryptography` with AES-256-GCM | Encryption of provider API keys at rest |
-| Python package manager | uv | Reproducible dependency installation and command execution |
-| JavaScript package manager | npm | Frontend dependency installation and scripts |
-| Containers | Docker Compose | PostgreSQL/PGVector and Redis services with persistent volumes |
-| Testing and validation | pytest, ESLint, TypeScript compiler | Backend tests, frontend linting, and type checking |
+| Backend | Python 3.12, FastAPI, Uvicorn, Pydantic | API, validation, ingestion, and evaluation |
+| Frontend | React 19, TypeScript, Vite | User and developer interfaces |
+| Frontend data | TanStack Query, React Router | API state, polling, mutations, and navigation |
+| UI | Lucide React, Recharts | Icons and evaluation charts |
+| Database | PostgreSQL 16, PGVector | Credentials, full-text search, vectors, and document metadata |
+| Jobs | Redis 7, RQ | Ingestion state, locks, evaluation jobs, and results |
+| RAG | LangChain | Provider and PGVector integrations |
+| Embeddings | Sentence Transformers | Local document and query embeddings |
+| Parsing | PyPDF, python-docx, openpyxl | PDF, DOCX, and XLSX extraction |
+| Security | AES-256-GCM through `cryptography` | API-key encryption at rest |
+| Infrastructure | Docker Compose | Persistent PostgreSQL/PGVector and Redis services |
+| Testing | pytest, ESLint, TypeScript | Backend and frontend validation |
 
-## Retrieval capabilities
+The default embedding model is
+`sentence-transformers/all-MiniLM-L6-v2`, running locally on CPU.
 
-Developer mode exposes the retrieval pipeline controls:
+## Documentation
 
-| Strategy | Description |
+| Guide | Contents |
 | --- | --- |
-| Semantic search | Finds conceptually similar chunks using local embeddings and PGVector |
-| Keyword search | Uses PostgreSQL full-text search for exact or lexical matches |
-| Hybrid fusion | Combines semantic and keyword rankings with reciprocal-rank fusion |
-| Query rewriting | Removes conversational noise and produces a concise search query without another LLM call |
-| Reranking | Rescores candidate chunks using local embedding similarity |
-| Source diversity | Spreads final results across distinct source files |
+| [Installation](docs/installation.md) | Detailed setup, startup order, configuration, and first-run checks |
+| [Architecture](docs/architecture.md) | Components, storage, and ingestion, chat, and evaluation flows |
+| [API reference](docs/api.md) | Endpoint catalog, request examples, statuses, and limits |
+| [RAG evaluation](docs/evaluation.md) | Dataset creation, review workflow, metrics, pass rules, and jobs |
+| [Security](docs/security.md) | Credential encryption, data handling, trust boundaries, and hardening |
+| [Deployment](docs/deployment.md) | Current Compose scope, production topology, persistence, and operations |
+| [Troubleshooting](docs/troubleshooting.md) | Common startup, ingestion, provider, and evaluation problems |
 
-## RAG quality evaluation
+## Quick start
 
-The evaluation workspace is intentionally separate from normal ingestion and
-chat. Evaluation runs only when a developer explicitly requests it.
+### Prerequisites
 
-It supports:
-
-- Generating ground-truth JSONL records from reviewed questions.
-- Uploading an existing validated JSONL evaluation dataset.
-- Comparing up to four answer providers in one run.
-- Selecting a separate provider as the evaluation judge.
-- Corpus and evidence fingerprints for stale-data detection.
-- Per-case errors, warnings, retrieved sources, timings, and usage.
-- Provider-level summaries and pass rates.
-
-Metrics include:
-
-| Category | Metrics |
-| --- | --- |
-| Retrieval | Precision@K, Recall@K, reciprocal rank, average precision, nDCG, source precision, source recall |
-| Answer quality | Correctness, groundedness, completeness, relevance, and overall score |
-| Citations | Citation accuracy, coverage, and deterministic validity |
-| Behavior | Abstention correctness, unsupported claims, and missing facts |
-| Similarity | Lexical similarity and local-embedding semantic similarity |
-| Operations | Retrieval time, generation time, grading time, total latency, token usage, and estimated cost |
-
-Machine-generated ground truth is marked `machine_generated`. Review it and set
-its `review_status` to `approved` before relying on evaluation scores.
-
-## Prerequisites
-
-Install the following before starting:
-
-- Docker Desktop or Docker Engine with Docker Compose
+- Docker with Docker Compose
 - Python 3.12 or newer
 - [uv](https://docs.astral.sh/uv/)
-- Node.js 20 or newer and npm
+- Node.js 20 or newer with npm
 - An API key for at least one supported LLM provider
 
 No `.env` file is required. Application defaults are stored in
-`app/api/config.py`; provider model names and API keys are entered through the
-Settings page.
+`app/api/config.py`; API keys and model names are entered through the UI.
 
-## Install and start the application
+### 1. Install the backend and start infrastructure
 
-Run the following commands from the repository root unless a step says
-otherwise.
-
-### 1. Install backend dependencies
+From the repository root:
 
 ```bash
 uv sync
-```
-
-### 2. Start PostgreSQL/PGVector and Redis
-
-```bash
 docker compose up -d
 docker compose ps
 ```
 
-Wait until both services report a healthy status.
+Wait for PostgreSQL/PGVector and Redis to report healthy.
 
-The default local ports are:
-
-| Service | Address |
-| --- | --- |
-| PostgreSQL/PGVector | `localhost:6024` |
-| Redis | `localhost:6379` |
-
-### 3. Start the backend API
-
-Open a new terminal in the repository root:
+### 2. Start the API
 
 ```bash
 uv run uvicorn app.api.main:app --reload
 ```
 
-The API is available at:
+- API: `http://localhost:8000/api/v1`
+- API documentation: `http://localhost:8000/docs`
 
-- API base: `http://localhost:8000/api/v1`
-- Interactive API documentation: `http://localhost:8000/docs`
+### 3. Start the evaluation worker
 
-### 4. Start the evaluation worker
-
-Open another terminal in the repository root:
+In another terminal:
 
 ```bash
 uv run employee-rag-worker
 ```
 
-The worker is required for asynchronous evaluation-dataset generation and
-evaluation runs. Normal ZIP ingestion and chat do not require this separate
-worker.
+The worker is required for asynchronous evaluation operations, but not for
+normal chat or ingestion.
 
-### 5. Install and start the frontend
+### 4. Start the frontend
 
-Open another terminal:
+In another terminal:
 
 ```bash
 cd frontend
@@ -254,217 +157,78 @@ Open `http://localhost:5173`.
 
 ## Use the application
 
-### 1. Configure an LLM provider
+### Configure a model
 
 1. Open **Settings**.
 2. Select Hugging Face, OpenAI, Anthropic, or Grok.
-3. Enter the exact model ID used by that provider.
-4. Enter the provider API key.
-5. Choose when the saved key should expire.
-6. Select **Save encrypted credential**.
+3. Enter the exact provider model ID and API key.
+4. Choose an expiry period and save the encrypted credential.
 
-The plaintext key is never returned to the browser after it is saved.
+### Upload and ingest data
 
-### 2. Upload company data
+1. Switch to **Developer** mode and open **Data**.
+2. Choose a ZIP containing supported files.
+3. Select **Upload ZIP**.
+4. Select **Start ingestion**.
+5. Wait for **Knowledge base ready**, then open chat.
 
-1. Switch to **Developer** mode.
-2. Open **Data**.
-3. Select a ZIP containing supported files.
-4. Select **Upload ZIP**.
-5. Review the structured and unstructured file counts.
+If ingestion has not completed, the home route displays data setup instead of
+chat. Uploading more data locks chat again until the next successful ingestion.
+The first run may take longer while the embedding model downloads.
 
-When no successful ingestion exists, the home route automatically displays the
-data setup screen instead of chat—even in User mode.
+### Ask questions
 
-### 3. Run ingestion
+1. Open **Ask** and select a configured provider.
+2. Enter an employee or company question.
+3. In Developer mode, optionally change the retrieval strategies.
+4. Review the grounded answer, sources, retrieved chunks, usage, and cost.
 
-1. Select **Start ingestion**.
-2. Keep the API running while the status changes from `pending` to `running`.
-3. Wait for **Knowledge base ready**.
-4. Select **Open chat**.
+### Evaluate RAG quality
 
-Chat is unlocked only when ingestion reaches `completed`. Uploading another ZIP
-resets the status to `idle`, and chat remains locked until the new ingestion run
-finishes successfully.
+1. Start the evaluation worker.
+2. Open **Evaluation** in Developer mode.
+3. Upload a validated JSONL dataset or generate one from a list of questions.
+4. Review machine-generated ground truth.
+5. Select answer providers, a judge provider, and retrieval settings.
+6. Run the evaluation and review the quality dashboard.
 
-The first ingestion may take longer because Sentence Transformers can download
-the embedding model into the local model cache.
+Evaluation includes retrieval metrics, correctness, groundedness, completeness,
+relevance, citation quality, abstention behavior, similarity, latency, token
+usage, and estimated cost. Evaluation datasets are limited to 10 MB and 100
+records by default.
 
-### 4. Ask questions
+## Security and deployment
 
-1. Open **Ask**.
-2. Select a configured model provider.
-3. Enter an employee or company question.
-4. In Developer mode, adjust the retrieval strategies if needed.
-5. Submit the question and review the answer, sources, retrieved chunks, token
-   usage, and request diagnostics.
-
-### 5. Evaluate the RAG system
-
-1. Make sure the evaluation worker is running.
-2. Switch to **Developer** mode and open **Evaluation**.
-3. Create a ground-truth dataset by either:
-   - uploading a validated JSONL dataset, or
-   - entering questions and generating references with a configured provider.
-4. Review machine-generated ground truth before treating it as authoritative.
-5. Select one or more answer providers.
-6. Select a judge provider.
-7. Choose the retrieval settings to evaluate.
-8. Start the run and wait for the dashboard results.
-
-Evaluation datasets are limited to 10 MB and 100 records by default.
-
-## Provider credential security
-
-- API keys and model selections are not read from `.env`.
-- Credentials are encrypted with AES-256-GCM before PostgreSQL storage.
-- API responses expose only a four-character key hint.
-- Expired credentials are rejected immediately and deleted automatically.
-- Keys can be deleted manually from the Settings page.
-- Local development creates the installation encryption key at
-  `.secrets/credential_encryption_key`.
-- Container deployments can mount the key read-only at
+- Provider keys are encrypted before PostgreSQL storage and are never returned
+  to the browser.
+- Expired keys are blocked and automatically deleted.
+- The local encryption key is stored in
+  `.secrets/credential_encryption_key` and must be backed up securely.
+- A container deployment can mount the key at
   `/run/secrets/credential_encryption_key`.
+- PostgreSQL and Redis use persistent Docker volumes and bind only to localhost
+  in the included Compose configuration.
 
-Back up the encryption key securely. Deleting it makes existing encrypted
-credentials unreadable. Removing a credential from this application does not
-revoke it at the provider; revoke compromised keys in the provider dashboard.
+The included `docker-compose.yml` currently starts PostgreSQL/PGVector and
+Redis. The API, worker, and frontend use the commands above. Before exposing the
+application publicly, add authentication, authorization, HTTPS, rate limiting,
+monitoring, backups, and production containers for the application processes.
 
-## Project structure
-
-```text
-Employee_Rag_System/
-├── app/
-│   ├── api/                 # FastAPI routes, controllers, schemas, and worker
-│   ├── core/                # Embeddings, PGVector, Redis, and credential storage
-│   ├── ingestion/           # Extraction, cleaning, chunking, and indexing
-│   ├── retrieval/           # Semantic, keyword, hybrid, and reranking logic
-│   └── evaluation/          # Datasets, metrics, jobs, judging, and reports
-├── frontend/
-│   └── src/                 # React pages, components, API client, and styles
-├── tests/                   # Backend unit and API tests
-├── docker-compose.yml       # PostgreSQL/PGVector and Redis services
-├── pyproject.toml           # Python dependencies and command-line scripts
-└── README.md
-```
-
-Generated data is stored in ignored local directories:
-
-```text
-data/             # Unstructured uploaded files
-structured_data/  # Structured uploaded files
-temp_data/        # Cleaned intermediate Markdown
-evaluation_data/  # Generated or uploaded evaluation JSONL files
-```
-
-Document vectors and encrypted credential records are stored in PostgreSQL.
-Redis stores ingestion state, distributed locks, evaluation jobs, and temporary
-job results.
-
-## Useful commands
-
-### Backend tests
+## Development checks
 
 ```bash
 uv run pytest -q
-```
 
-### Frontend lint and production build
-
-```bash
 cd frontend
 npm run lint
 npm run build
 ```
 
-### Stop infrastructure
+Stop the local data services with:
 
 ```bash
 docker compose down
 ```
 
-To also delete PostgreSQL and Redis volumes, use `docker compose down -v` only
-when permanent local data deletion is intended.
-
-## API overview
-
-All application endpoints use the `/api/v1` prefix.
-
-| Method | Endpoint | Purpose |
-| --- | --- | --- |
-| `POST` | `/data/upload` | Validate and store an uploaded ZIP |
-| `POST` | `/ingestion/start` | Start ingestion in the API background runner |
-| `GET` | `/ingestion/status` | Read the latest ingestion state |
-| `GET` | `/retrieval/search` | Retrieve chunks without generating an answer |
-| `POST` | `/answers/generate` | Retrieve evidence and generate a grounded answer |
-| `GET` | `/settings/providers` | List masked active provider credentials |
-| `POST` | `/settings/providers` | Encrypt and save a provider credential |
-| `DELETE` | `/settings/providers/{provider}` | Delete a saved provider credential |
-| `POST` | `/evaluations/datasets/upload` | Upload and validate evaluation JSONL |
-| `POST` | `/evaluations/datasets/generate/async` | Queue ground-truth generation |
-| `POST` | `/evaluations/run/async` | Queue an evaluation run |
-| `GET` | `/evaluations/jobs/{job_id}` | Poll an evaluation job and its result |
-
-## Deployment notes
-
-The application is structured for deployment with:
-
-- A separately runnable FastAPI application layer
-- A separately buildable React frontend
-- A separate RQ evaluation worker
-- Persistent PostgreSQL/PGVector and Redis volumes
-- Service health checks
-- Central Python configuration without end-user `.env` editing
-- Encrypted provider credentials and optional Docker secret mounting
-
-The included `docker-compose.yml` currently provisions PostgreSQL/PGVector and
-Redis. The API, worker, and frontend are started with the commands above. To
-operate the entire stack as containers, add production images for those three
-application processes and place a TLS reverse proxy in front of them.
-
-Before an internet-facing or multi-user deployment, also add:
-
-- Authentication and role-based authorization
-- Per-user or per-tenant data and credential ownership
-- HTTPS/TLS termination
-- A managed secret store and encryption-key backup procedure
-- Request throttling, audit logging, monitoring, and database backups
-- Network rules that keep PostgreSQL and Redis private
-
-Until those controls are added, run the application only in a trusted private
-environment.
-
-## Troubleshooting
-
-### Chat shows the data setup screen
-
-This is expected until ingestion completes. Upload a ZIP and start ingestion.
-If the last run failed, review the error displayed on the Data page and retry.
-
-### PostgreSQL or Redis is unavailable
-
-```bash
-docker compose ps
-docker compose up -d
-```
-
-Both services should report healthy before starting ingestion or evaluation.
-
-### No provider appears on the Ask page
-
-Open Settings and save an unexpired API key and model name for at least one
-provider.
-
-### Evaluation stays queued
-
-Start the worker from the repository root:
-
-```bash
-uv run employee-rag-worker
-```
-
-### An uploaded filename already exists
-
-Uploads never silently overwrite source data. Rename the file in the ZIP, or
-remove the old local source file only when replacement is intentional, and then
-upload again.
+Use `docker compose down -v` only when you intentionally want to delete the
+PostgreSQL and Redis volumes.
