@@ -1,42 +1,30 @@
 from dataclasses import dataclass
-import os
 import re
 
-from dotenv import load_dotenv
 from langchain_core.embeddings import Embeddings
 from langchain_postgres import PGEngine, PGVectorStore
 
+from app.api import config
 
-DEFAULT_TABLE_NAME = "employee_documents"
-DEFAULT_SCHEMA_NAME = "public"
+
+DEFAULT_TABLE_NAME = config.PGVECTOR_TABLE
+DEFAULT_SCHEMA_NAME = config.PGVECTOR_SCHEMA
 ID_COLUMN = "chunk_id"
 IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 @dataclass(frozen=True, slots=True)
 class PGVectorSettings:
-    database_url: str
-    table_name: str = DEFAULT_TABLE_NAME
-    schema_name: str = DEFAULT_SCHEMA_NAME
+    database_url: str = config.DATABASE_URL
+    table_name: str = config.PGVECTOR_TABLE
+    schema_name: str = config.PGVECTOR_SCHEMA
 
     @classmethod
-    def from_env(cls) -> "PGVectorSettings":
-        load_dotenv()
-
-        database_url = os.getenv("DATABASE_URL", "").strip()
-        if not database_url:
-            raise ValueError("DATABASE_URL must be set in the environment")
-
-        table_name = os.getenv("PGVECTOR_TABLE", DEFAULT_TABLE_NAME).strip()
-        schema_name = os.getenv("PGVECTOR_SCHEMA", DEFAULT_SCHEMA_NAME).strip()
-        _validate_identifier("PGVECTOR_TABLE", table_name)
-        _validate_identifier("PGVECTOR_SCHEMA", schema_name)
-
-        return cls(
-            database_url=database_url,
-            table_name=table_name,
-            schema_name=schema_name,
-        )
+    def from_config(cls) -> "PGVectorSettings":
+        settings = cls()
+        _validate_identifier("PGVECTOR_TABLE", settings.table_name)
+        _validate_identifier("PGVECTOR_SCHEMA", settings.schema_name)
+        return settings
 
 
 def _validate_identifier(setting_name: str, value: str) -> None:
@@ -98,6 +86,6 @@ def connect_vector_store(
     settings: PGVectorSettings | None = None,
 ) -> PGVectorStore:
     """Connect to an existing PGVector table without modifying it."""
-    settings = settings or PGVectorSettings.from_env()
+    settings = settings or PGVectorSettings.from_config()
     engine = create_pg_engine(settings)
     return open_vector_store(engine, embedding_model, settings)

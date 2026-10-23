@@ -4,12 +4,12 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 import json
 import math
-import os
 from typing import Any, Literal
 
 from langchain_core.messages import BaseMessage
 from pydantic import BaseModel, Field
 
+from app.api import config
 
 MILLION_TOKENS = 1_000_000
 APPROXIMATE_CHARACTERS_PER_TOKEN = 4
@@ -35,7 +35,7 @@ class LLMUsage(BaseModel):
     )
     output_cost_per_million_usd: float | None = Field(default=None, ge=0)
     estimated_cost_usd: float | None = Field(default=None, ge=0)
-    pricing_source: Literal["built_in", "environment", "unavailable"]
+    pricing_source: Literal["built_in", "unavailable"]
     currency: Literal["USD"] = "USD"
 
 
@@ -62,21 +62,12 @@ class ModelPricing:
     cache_creation_per_million_usd: float
 
 
-# Standard API rates for the exact default/configured model IDs. Pricing for
-# other models must be supplied through the documented environment overrides.
+# Standard API rates for exact model IDs. Unknown models remain explicitly
+# unpriced rather than requiring customer configuration.
 KNOWN_MODEL_PRICING: dict[tuple[str, str], ModelPricing] = {
-    ("openai", "gpt-6-astra"): ModelPricing(10.0, 50.0, 1.0, 12.5),
-    ("anthropic", "claude-opus-5-5"): ModelPricing(4.0, 20.0, 0.2, 5.0),
-    ("grok", "grok-4.7"): ModelPricing(2.0, 6.0, 0.5, 2.0),
+    key: ModelPricing(*rates)
+    for key, rates in config.MODEL_PRICING_USD_PER_MILLION.items()
 }
-
-_ENV_PREFIX = {
-    "huggingface": "HF",
-    "openai": "OPENAI",
-    "anthropic": "ANTHROPIC",
-    "grok": "GROK",
-}
-
 
 def _nonnegative_int(value: Any) -> int | None:
     if isinstance(value, bool):
@@ -174,89 +165,14 @@ def _estimated_tokens(text: str) -> int:
     )
 
 
-def _env_rate(name: str) -> float | None:
-    value = os.getenv(name, "").strip()
-    if not value:
-        return None
-    try:
-        parsed = float(value)
-    except ValueError:
-        return None
-    return parsed if math.isfinite(parsed) and parsed >= 0 else None
-
-
 def _pricing_for(
     provider: str,
     model_name: str,
-) -> tuple[ModelPricing | None, Literal["built_in", "environment", "unavailable"]]:
-    normalized_provider = provider.casefold()
+) -> tuple[ModelPricing | None, Literal["built_in", "unavailable"]]:
     known = KNOWN_MODEL_PRICING.get(
-        (normalized_provider, model_name.casefold())
+        (provider.casefold(), model_name.casefold())
     )
-    prefix = _ENV_PREFIX.get(normalized_provider)
-    if prefix is None:
-        return known, "built_in" if known else "unavailable"
-
-    input_override = _env_rate(
-        f"{prefix}_INPUT_COST_PER_MILLION_USD"
-    )
-    output_override = _env_rate(
-        f"{prefix}_OUTPUT_COST_PER_MILLION_USD"
-    )
-    cached_override = _env_rate(
-        f"{prefix}_CACHED_INPUT_COST_PER_MILLION_USD"
-    )
-    creation_override = _env_rate(
-        f"{prefix}_CACHE_CREATION_COST_PER_MILLION_USD"
-    )
-    overrides = (
-        input_override,
-        output_override,
-        cached_override,
-        creation_override,
-    )
-    if not any(value is not None for value in overrides):
-        return known, "built_in" if known else "unavailable"
-
-    input_rate = (
-        input_override
-        if input_override is not None
-        else (known.input_per_million_usd if known else None)
-    )
-    output_rate = (
-        output_override
-        if output_override is not None
-        else (known.output_per_million_usd if known else None)
-    )
-    if input_rate is None or output_rate is None:
-        return None, "unavailable"
-    cached_rate = (
-        cached_override
-        if cached_override is not None
-        else (
-            known.cached_input_per_million_usd
-            if known
-            else input_rate
-        )
-    )
-    creation_rate = (
-        creation_override
-        if creation_override is not None
-        else (
-            known.cache_creation_per_million_usd
-            if known
-            else input_rate
-        )
-    )
-    return (
-        ModelPricing(
-            input_rate,
-            output_rate,
-            cached_rate,
-            creation_rate,
-        ),
-        "environment",
-    )
+    return known, "built_in" if known else "unavailable"
 
 
 def calculate_llm_usage(

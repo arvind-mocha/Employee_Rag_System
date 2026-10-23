@@ -1,50 +1,35 @@
 from dataclasses import dataclass
-import os
 
-from dotenv import load_dotenv
 from langchain_core.embeddings import Embeddings
 from langchain_huggingface import HuggingFaceEmbeddings
+
+from app.api import config
 
 
 @dataclass(frozen=True, slots=True)
 class EmbeddingSettings:
-    model_name: str
-    batch_size: int
-    device: str = "cpu"
+    model_name: str = config.EMBEDDING_MODEL
+    batch_size: int = config.EMBEDDING_BATCH_SIZE
+    device: str = config.EMBEDDING_DEVICE
+
+    def __post_init__(self) -> None:
+        if not self.model_name.strip():
+            raise ValueError("embedding model name cannot be blank")
+        if self.batch_size < 1:
+            raise ValueError("embedding batch size must be at least 1")
+        if not self.device.strip():
+            raise ValueError("embedding device cannot be blank")
 
     @classmethod
-    def from_env(cls) -> "EmbeddingSettings":
-        load_dotenv()
-
-        model_name = os.getenv("EMBEDDING_MODEL", "").strip()
-        if not model_name:
-            raise ValueError("EMBEDDING_MODEL must be set in the environment")
-
-        raw_batch_size = os.getenv("EMBEDDING_BATCH_SIZE", "").strip()
-        if not raw_batch_size:
-            raise ValueError("EMBEDDING_BATCH_SIZE must be set in the environment")
-
-        try:
-            batch_size = int(raw_batch_size)
-        except ValueError as error:
-            raise ValueError("EMBEDDING_BATCH_SIZE must be an integer") from error
-
-        if batch_size < 1:
-            raise ValueError("EMBEDDING_BATCH_SIZE must be at least 1")
-
-        device = os.getenv("EMBEDDING_DEVICE", "cpu").strip() or "cpu"
-        return cls(
-            model_name=model_name,
-            batch_size=batch_size,
-            device=device,
-        )
+    def from_config(cls) -> "EmbeddingSettings":
+        return cls()
 
 
 def create_embedding_model(
     settings: EmbeddingSettings | None = None,
 ) -> HuggingFaceEmbeddings:
     """Create the configured local Hugging Face embedding model."""
-    settings = settings or EmbeddingSettings.from_env()
+    settings = settings or EmbeddingSettings.from_config()
 
     return HuggingFaceEmbeddings(
         model=settings.model_name,

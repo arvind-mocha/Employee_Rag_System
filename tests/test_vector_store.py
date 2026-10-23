@@ -1,7 +1,7 @@
-import os
 import unittest
 from unittest.mock import Mock, patch
 
+from app.api import config
 from app.core.vector_store import (
     ID_COLUMN,
     PGVectorSettings,
@@ -15,19 +15,12 @@ from app.ingestion.chunker import DocumentChunk
 
 
 class PGVectorSettingsTests(unittest.TestCase):
-    @patch.dict(
-        os.environ,
-        {
-            "DATABASE_URL": "postgresql://user:password@localhost/database",
-            "PGVECTOR_TABLE": "documents",
-            "PGVECTOR_SCHEMA": "rag",
-        },
-    )
-    def test_loads_pgvector_settings_from_environment(self) -> None:
-        settings = PGVectorSettings.from_env()
+    def test_loads_central_pgvector_configuration(self) -> None:
+        settings = PGVectorSettings.from_config()
 
-        self.assertEqual(settings.table_name, "documents")
-        self.assertEqual(settings.schema_name, "rag")
+        self.assertEqual(settings.database_url, config.DATABASE_URL)
+        self.assertEqual(settings.table_name, config.PGVECTOR_TABLE)
+        self.assertEqual(settings.schema_name, config.PGVECTOR_SCHEMA)
 
     def test_normalizes_standard_postgres_url(self) -> None:
         self.assertEqual(

@@ -13,14 +13,14 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 import psycopg
 from psycopg.rows import dict_row
 
-from app.api.config import PROJECT_ROOT
+from app.api import config
 from app.core.vector_store import PGVectorSettings
 
 
 PROVIDERS = ("huggingface", "openai", "anthropic", "grok")
 KEY_BYTES = 32
 KEY_VERSION = 1
-DEFAULT_KEY_PATH = PROJECT_ROOT / ".secrets" / "credential_encryption_key"
+DEFAULT_KEY_PATH = config.CREDENTIAL_ENCRYPTION_KEY_FILE
 
 
 class CredentialStoreError(RuntimeError):
@@ -57,16 +57,10 @@ class CredentialCipher:
     """Encrypt and decrypt provider keys with authenticated encryption."""
 
     def __init__(self, key_path: Path | None = None) -> None:
-        configured_path = os.getenv(
-            "CREDENTIAL_ENCRYPTION_KEY_FILE",
-            "",
-        ).strip()
-        self._explicit_path = key_path is None and bool(configured_path)
-        self.key_path = key_path or (
-            Path(configured_path).expanduser()
-            if configured_path
-            else DEFAULT_KEY_PATH
+        self._external_path = (
+            key_path is None and config.USE_DOCKER_CREDENTIAL_SECRET
         )
+        self.key_path = key_path or DEFAULT_KEY_PATH
         self._key: bytes | None = None
         self._lock = Lock()
 
@@ -108,13 +102,13 @@ class CredentialCipher:
 
     def _load_or_create_key(self) -> bytes:
         if not self.key_path.exists():
-            if self._explicit_path:
+            if self._external_path:
                 raise CredentialStoreConfigurationError(
                     f"Credential encryption key file does not exist: {self.key_path}"
                 )
             self._create_key_file()
 
-        if not self._explicit_path and os.name == "posix":
+        if not self._external_path and os.name == "posix":
             try:
                 self.key_path.parent.chmod(0o700)
                 self.key_path.chmod(0o600)
@@ -401,7 +395,7 @@ class CredentialStore:
         database_url = self._database_url
         if database_url is None:
             try:
-                database_url = PGVectorSettings.from_env().database_url
+                database_url = PGVectorSettings.from_config().database_url
             except ValueError as error:
                 raise CredentialStoreConfigurationError(str(error)) from error
         if database_url.startswith("postgresql+psycopg://"):

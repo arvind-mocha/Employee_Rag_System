@@ -3,17 +3,17 @@ services:
     image: pgvector/pgvector:pg16
     container_name: employee-rag-pgvector
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-employee_rag}
-      POSTGRES_USER: ${POSTGRES_USER:-employee_rag}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-employee_rag_dev}
+      POSTGRES_DB: employee_rag
+      POSTGRES_USER: employee_rag
+      POSTGRES_PASSWORD: employee_rag_dev
     ports:
-      - "${POSTGRES_PORT:-6024}:5432"
+      - "127.0.0.1:6024:5432"
     volumes:
       - pgvector_data:/var/lib/postgresql/data
     healthcheck:
       test:
         - CMD-SHELL
-        - pg_isready -U ${POSTGRES_USER:-employee_rag} -d ${POSTGRES_DB:-employee_rag}
+        - pg_isready -U employee_rag -d employee_rag
       interval: 5s
       timeout: 5s
       retries: 10
@@ -23,7 +23,7 @@ services:
     container_name: employee-rag-redis
     command: redis-server --appendonly yes
     ports:
-      - "${REDIS_PORT:-6379}:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - redis_data:/data
     healthcheck:

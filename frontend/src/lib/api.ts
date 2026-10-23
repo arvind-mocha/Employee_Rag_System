@@ -11,7 +11,7 @@ import type {
   UploadEvaluationDatasetResponse,
 } from '../types/api'
 
-const API_ROOT = import.meta.env.VITE_API_ROOT ?? '/api/v1'
+const API_ROOT = '/api/v1'
 
 export class ApiError extends Error {
   status: number

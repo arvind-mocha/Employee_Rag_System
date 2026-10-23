@@ -10,6 +10,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint
 from langchain_openai import ChatOpenAI
 
+from app.api import config
 from app.api.llm_usage import LLMUsage, calculate_llm_usage
 from app.api.prompts import build_answer_messages
 from app.core.credential_store import (
@@ -21,8 +22,8 @@ from app.retrieval.models import RetrievedChunk
 
 
 DEFAULT_HF_MODEL = "google/gemma-2-2b-it"
-DEFAULT_HF_PROVIDER = "auto"
-DEFAULT_GROK_BASE_URL = "https://api.x.ai/v1"
+DEFAULT_HF_PROVIDER = config.HUGGINGFACE_INFERENCE_PROVIDER
+DEFAULT_GROK_BASE_URL = config.GROK_BASE_URL
 MAX_ANSWER_TOKENS = 512
 MODEL_TIMEOUT_SECONDS = 120
 

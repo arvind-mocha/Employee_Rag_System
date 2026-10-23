@@ -43,7 +43,7 @@ def process_2():
 
 # Process 3: Embed and index chunks in PGVector
 def process_3(chunks: list[DocumentChunk]) -> list[str]:
-    embedding_settings = EmbeddingSettings.from_env()
+    embedding_settings = EmbeddingSettings.from_config()
     embedding_model = create_embedding_model(embedding_settings)
     vector_store = create_vector_store(embedding_model)
     return index_chunks(

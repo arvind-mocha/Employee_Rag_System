@@ -13,15 +13,10 @@ docker compose up -d
 docker compose ps
 ```
 
-The local defaults are:
-
-```dotenv
-DATABASE_URL=postgresql://employee_rag:employee_rag_dev@localhost:6024/employee_rag
-REDIS_URL=redis://localhost:6379/0
-REDIS_EVALUATION_QUEUE=employee-rag-evaluations
-REDIS_JOB_TIMEOUT_SECONDS=1800
-REDIS_RESULT_TTL_SECONDS=86400
-```
+No `.env` file is required. PostgreSQL, Redis, PGVector, embeddings, queue
+settings, paths, and limits have application defaults in `app/api/config.py`.
+The application automatically uses local ports when run on the host and Docker
+service names when run in a container.
 
 ## Run the API
 
@@ -56,7 +51,7 @@ request diagnostics, dataset generation, and on-demand evaluation dashboards.
 
 Open `http://localhost:5173/settings` and add the API key, model ID, and expiry
 period for each provider that this installation should use. The API no longer
-loads provider keys or model names from `.env` during normal requests.
+loads application configuration, provider keys, or model names from `.env`.
 
 Provider API keys are encrypted with AES-256-GCM before they are stored in the
 `provider_credentials` PostgreSQL table. API responses expose only the final
@@ -67,11 +62,11 @@ page.
 On first use, local development creates a per-installation encryption key at
 `.secrets/credential_encryption_key`. This directory is ignored by Git. Do not
 commit, share, or delete that file while encrypted credentials still need to be
-read. For a container deployment, mount the same read-only secret file into the
-API and worker containers and set:
+read. For a container deployment, mount the same read-only file into the API and
+worker containers at the automatically detected path:
 
-```dotenv
-CREDENTIAL_ENCRYPTION_KEY_FILE=/run/secrets/credential_encryption_key
+```text
+/run/secrets/credential_encryption_key
 ```
 
 Deleting a credential from this application does not revoke it at the model
@@ -118,18 +113,6 @@ counts from text length and labels `token_count_source` as `estimated`. Built-in
 standard API rates are included for the configured `gpt-6-astra`,
 `claude-opus-5-5`, and `grok-4.7` model IDs.
 
-Hugging Face `HF_PROVIDER=auto` pricing depends on the provider selected at
-runtime. Set these variables to return an estimated HF cost, or use the same
-provider-prefixed variables to override any built-in rate:
-
-```dotenv
-HF_INPUT_COST_PER_MILLION_USD=
-HF_OUTPUT_COST_PER_MILLION_USD=
-HF_CACHED_INPUT_COST_PER_MILLION_USD=
-HF_CACHE_CREATION_COST_PER_MILLION_USD=
-```
-
-Replace `HF` with `OPENAI`, `ANTHROPIC`, or `GROK` for another provider.
 When pricing is unavailable, token usage is still returned, while
 `estimated_cost_usd` is `null` and aggregate results increment `unpriced_calls`.
 Costs are estimates and may differ from provider invoices due to pricing tiers,

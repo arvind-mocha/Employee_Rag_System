@@ -50,7 +50,7 @@ export interface LlmUsage {
   cache_creation_cost_per_million_usd: number | null
   output_cost_per_million_usd: number | null
   estimated_cost_usd: number | null
-  pricing_source: 'built_in' | 'environment' | 'unavailable'
+  pricing_source: 'built_in' | 'unavailable'
   currency: 'USD'
 }
 
