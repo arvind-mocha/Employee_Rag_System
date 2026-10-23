@@ -6,6 +6,8 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIRECTORY = PROJECT_ROOT / "data"
 STRUCTURED_DATA_DIRECTORY = PROJECT_ROOT / "structured_data"
+TEMP_DATA_DIRECTORY = PROJECT_ROOT / "temp_data"
+EVALUATION_DATA_DIRECTORY = PROJECT_ROOT / "evaluation_data"
 
 STRUCTURED_EXTENSIONS = frozenset({".csv", ".json", ".xlsx"})
 UNSTRUCTURED_EXTENSIONS = frozenset(

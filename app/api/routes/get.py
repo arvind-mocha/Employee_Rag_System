@@ -3,9 +3,11 @@
 from http import HTTPStatus
 
 from app.api.controllers.ingestion import get_ingestion_status
+from app.api.controllers.evaluation_jobs import get_evaluation_job
 from app.api.controllers.retrieval import retrieve_chunks
 from app.api.routes.definition import ApiRoute
 from app.api.schemas.ingestion import IngestionStatusResponse
+from app.api.schemas.jobs import EvaluationJobStatus
 from app.api.schemas.retrieval import RetrievalResponse
 
 
@@ -25,5 +27,13 @@ GET_ROUTES = (
         response_model=RetrievalResponse,
         status_code=HTTPStatus.OK,
         tags=("retrieval",),
+    ),
+    ApiRoute(
+        name="get_evaluation_job",
+        path="/evaluations/jobs/{job_id}",
+        endpoint=get_evaluation_job,
+        response_model=EvaluationJobStatus,
+        status_code=HTTPStatus.OK,
+        tags=("evaluations",),
     ),
 )

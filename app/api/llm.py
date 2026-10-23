@@ -4,14 +4,16 @@ from dataclasses import dataclass
 from enum import StrEnum
 from functools import lru_cache
 import os
-from typing import Any
+from typing import Any, Sequence
 
 from dotenv import load_dotenv
+from langchain_core.messages import BaseMessage
 from langchain_anthropic import ChatAnthropic
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint
 from langchain_openai import ChatOpenAI
 
+from app.api.llm_usage import LLMUsage, calculate_llm_usage
 from app.api.prompts import build_answer_messages
 from app.retrieval.models import RetrievedChunk
 
@@ -130,6 +132,15 @@ class GeneratedAnswer:
     answer: str
     provider: LLMProvider
     model_name: str
+    usage: LLMUsage | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class GeneratedText:
+    text: str
+    provider: LLMProvider
+    model_name: str
+    usage: LLMUsage | None = None
 
 
 def select_provider(
@@ -265,9 +276,26 @@ def generate_grounded_answer(
     if not chunks:
         raise ValueError("at least one retrieved chunk is required")
 
+    generated = invoke_chat_model(
+        build_answer_messages(question, chunks),
+        provider,
+    )
+    return GeneratedAnswer(
+        generated.text,
+        generated.provider,
+        generated.model_name,
+        generated.usage,
+    )
+
+
+def invoke_chat_model(
+    messages: Sequence[BaseMessage],
+    provider: LLMProvider,
+) -> GeneratedText:
+    """Invoke one configured provider and return normalized text safely."""
     try:
         client = get_chat_model_client(provider)
-        response = client.model.invoke(build_answer_messages(question, chunks))
+        response = client.model.invoke(messages)
     except LLMConfigurationError:
         raise
     except Exception as error:
@@ -275,7 +303,17 @@ def generate_grounded_answer(
             provider,
             _provider_error_detail(provider, error),
         ) from error
-    answer = _message_text(response.content)
-    if not answer:
-        raise RuntimeError("The selected language model returned an empty answer")
-    return GeneratedAnswer(answer, client.provider, client.model_name)
+
+    text = _message_text(response.content)
+    if not text:
+        raise LLMProviderRequestError(
+            provider,
+            f"{provider.value} returned an empty response.",
+        )
+    usage = calculate_llm_usage(
+        messages,
+        response,
+        client.provider.value,
+        client.model_name,
+    )
+    return GeneratedText(text, client.provider, client.model_name, usage)

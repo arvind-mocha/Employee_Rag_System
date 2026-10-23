@@ -2,6 +2,7 @@
 
 from pydantic import Field, model_validator
 
+from app.api.llm_usage import LLMUsage
 from app.api.schemas.retrieval import RetrievalRequest, RetrievedChunkResponse
 
 
@@ -35,4 +36,5 @@ class AnswerResponse(RetrievalRequest):
     provider: str
     model: str
     answer: str
+    usage: LLMUsage | None
     sources: list[RetrievedChunkResponse]

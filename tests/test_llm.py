@@ -165,6 +165,8 @@ class AnswerGenerationTests(unittest.TestCase):
 
         self.assertEqual(result.provider, LLMProvider.HUGGINGFACE)
         self.assertIn("15 vacation days", result.answer)
+        self.assertIsNotNone(result.usage)
+        self.assertEqual(result.usage.token_count_source, "estimated")
         messages = model.invoke.call_args.args[0]
         self.assertIn("handbook.md", messages[1].content)
         self.assertIn("Employees receive 15", messages[1].content)

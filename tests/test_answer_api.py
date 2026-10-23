@@ -9,6 +9,7 @@ from app.api.llm import (
     LLMProvider,
     LLMProviderRequestError,
 )
+from app.api.llm_usage import LLMUsage
 from app.api.main import app
 from app.retrieval.models import RetrievedChunk
 from app.retrieval.query_router import RetrievalOptions
@@ -44,6 +45,14 @@ class AnswerApiTests(unittest.TestCase):
             "Employees receive 15 vacation days [1].",
             LLMProvider.HUGGINGFACE,
             "google/gemma-2-2b-it",
+            LLMUsage(
+                input_tokens=100,
+                output_tokens=10,
+                total_tokens=110,
+                token_count_source="provider",
+                estimated_cost_usd=None,
+                pricing_source="unavailable",
+            ),
         )
 
         response = self.client.post(
@@ -60,6 +69,8 @@ class AnswerApiTests(unittest.TestCase):
         self.assertEqual(body["model"], "google/gemma-2-2b-it")
         self.assertEqual(body["effective_query"], "vacation days employees receive")
         self.assertEqual(body["sources"][0]["chunk_id"], "chunk-1")
+        self.assertEqual(body["usage"]["total_tokens"], 110)
+        self.assertIsNone(body["usage"]["estimated_cost_usd"])
         options = RetrievalOptions(query_rewriting=True)
         router.search.assert_called_once_with(
             "How many vacation days do employees receive?",
