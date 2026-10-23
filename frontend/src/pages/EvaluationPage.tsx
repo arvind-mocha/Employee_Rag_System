@@ -68,6 +68,69 @@ const TERMINAL_JOB_STATES = new Set([
   'canceled',
 ])
 
+const EVALUATION_JOB_STORAGE_KEY = 'employee-rag-active-evaluation-job'
+const DATASET_JOB_STORAGE_KEY = 'employee-rag-active-dataset-job'
+const DATASET_NAME_STORAGE_KEY = 'employee-rag-evaluation-dataset-name'
+const STORED_JOB_MAX_AGE_MS = 25 * 60 * 60 * 1_000
+
+interface StoredEvaluationJob {
+  job: EvaluationJobAccepted
+  savedAt: number
+}
+
+function isEvaluationJob(value: unknown): value is EvaluationJobAccepted {
+  if (!value || typeof value !== 'object') return false
+  const job = value as Record<string, unknown>
+  return (
+    typeof job.job_id === 'string' &&
+    (job.job_type === 'dataset_generation' || job.job_type === 'evaluation_run') &&
+    job.status === 'queued' &&
+    typeof job.status_url === 'string' &&
+    job.status_url.startsWith('/api/v1/evaluations/jobs/')
+  )
+}
+
+function readStoredJob(key: string): EvaluationJobAccepted | null {
+  try {
+    const parsed = JSON.parse(
+      window.localStorage.getItem(key) ?? 'null',
+    ) as Partial<StoredEvaluationJob> | null
+    if (
+      !parsed ||
+      !isEvaluationJob(parsed.job) ||
+      typeof parsed.savedAt !== 'number' ||
+      Date.now() - parsed.savedAt > STORED_JOB_MAX_AGE_MS
+    ) {
+      window.localStorage.removeItem(key)
+      return null
+    }
+    return parsed.job
+  } catch {
+    window.localStorage.removeItem(key)
+    return null
+  }
+}
+
+function storeJob(key: string, job: EvaluationJobAccepted | null) {
+  if (!job) {
+    window.localStorage.removeItem(key)
+    return
+  }
+  const stored: StoredEvaluationJob = { job, savedAt: Date.now() }
+  window.localStorage.setItem(key, JSON.stringify(stored))
+}
+
+function readStoredDatasetName(): string {
+  const value = window.localStorage.getItem(DATASET_NAME_STORAGE_KEY) ?? ''
+  return /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(value)
+    ? value
+    : 'employee-policies'
+}
+
+function storeDatasetName(value: string) {
+  window.localStorage.setItem(DATASET_NAME_STORAGE_KEY, value)
+}
+
 type DatasetBuilderMode = 'upload' | 'generate'
 
 function useEvaluationJob(job: EvaluationJobAccepted | null) {
@@ -147,6 +210,9 @@ function JobProgress({
       <div>
         <strong>{label}</strong>
         <span>{error ?? (complete ? 'Completed successfully' : `${status}…`)}</span>
+        {!failed && !complete && (
+          <small>Safe to leave this page—the background worker will continue.</small>
+        )}
       </div>
     </div>
   )
@@ -436,7 +502,7 @@ function EvaluationDashboard({ run }: { run: EvaluationRun }) {
 }
 
 export function EvaluationPage() {
-  const [datasetName, setDatasetName] = useState('employee-policies')
+  const [datasetName, setDatasetName] = useState(readStoredDatasetName)
   const [answerProviders, setAnswerProviders] = useState<Provider[]>([
     'huggingface',
     'openai',
@@ -445,7 +511,9 @@ export function EvaluationPage() {
   const [retrieval, setRetrieval] =
     useState<RetrievalOptions>(DEFAULT_RETRIEVAL)
   const [evaluationJob, setEvaluationJob] =
-    useState<EvaluationJobAccepted | null>(null)
+    useState<EvaluationJobAccepted | null>(() =>
+      readStoredJob(EVALUATION_JOB_STORAGE_KEY),
+    )
   const [showDatasetBuilder, setShowDatasetBuilder] = useState(false)
   const [datasetBuilderMode, setDatasetBuilderMode] =
     useState<DatasetBuilderMode>('upload')
@@ -453,24 +521,35 @@ export function EvaluationPage() {
   const [referenceProvider, setReferenceProvider] =
     useState<Provider>('huggingface')
   const [overwrite, setOverwrite] = useState(false)
-  const [datasetJob, setDatasetJob] = useState<EvaluationJobAccepted | null>(null)
+  const [datasetJob, setDatasetJob] = useState<EvaluationJobAccepted | null>(
+    () => readStoredJob(DATASET_JOB_STORAGE_KEY),
+  )
   const [datasetFile, setDatasetFile] = useState<File | null>(null)
 
   const evaluationMutation = useMutation({
     mutationFn: api.runEvaluation,
-    onSuccess: (job) => setEvaluationJob(job),
+    onSuccess: (job) => {
+      storeJob(EVALUATION_JOB_STORAGE_KEY, job)
+      setEvaluationJob(job)
+    },
   })
   const evaluationStatus = useEvaluationJob(evaluationJob)
 
   const datasetMutation = useMutation({
     mutationFn: api.generateDataset,
-    onSuccess: (job) => setDatasetJob(job),
+    onSuccess: (job) => {
+      storeJob(DATASET_JOB_STORAGE_KEY, job)
+      setDatasetJob(job)
+    },
   })
   const datasetStatus = useEvaluationJob(datasetJob)
 
   const uploadMutation = useMutation({
     mutationFn: api.uploadDataset,
-    onSuccess: (result) => setDatasetName(result.dataset_name),
+    onSuccess: (result) => {
+      storeDatasetName(result.dataset_name)
+      setDatasetName(result.dataset_name)
+    },
   })
 
   const completedRun =
@@ -481,6 +560,8 @@ export function EvaluationPage() {
   const runEvaluation = (event: FormEvent) => {
     event.preventDefault()
     if (!datasetName.trim() || !answerProviders.length) return
+    storeDatasetName(datasetName.trim())
+    storeJob(EVALUATION_JOB_STORAGE_KEY, null)
     setEvaluationJob(null)
     evaluationMutation.mutate({
       dataset_name: datasetName.trim(),
@@ -497,6 +578,8 @@ export function EvaluationPage() {
       .map((question) => question.trim())
       .filter(Boolean)
     if (!datasetName.trim() || !questions.length) return
+    storeDatasetName(datasetName.trim())
+    storeJob(DATASET_JOB_STORAGE_KEY, null)
     setDatasetJob(null)
     uploadMutation.reset()
     datasetMutation.mutate({
@@ -511,6 +594,8 @@ export function EvaluationPage() {
   const uploadDataset = (event: FormEvent) => {
     event.preventDefault()
     if (!datasetName.trim() || !datasetFile) return
+    storeDatasetName(datasetName.trim())
+    storeJob(DATASET_JOB_STORAGE_KEY, null)
     setDatasetJob(null)
     datasetMutation.reset()
     uploadMutation.mutate({

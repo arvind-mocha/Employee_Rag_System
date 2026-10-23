@@ -681,6 +681,7 @@ button:disabled {
 .job-progress strong { font-size: 13px; }
 .loading-answer span,
 .job-progress span { color: #818984; font-size: 11px; }
+.job-progress small { color: #969d98; font-size: 9px; }
 
 .loading-orbit svg { animation: pulse 1.5s ease-in-out infinite; }
 .spin { animation: spin .9s linear infinite; }
