@@ -69,7 +69,7 @@ def generate_evaluation_dataset(
             detail=str(error),
         ) from error
     except LLMProviderRequestError as error:
-        logger.exception("Evaluation reference provider request failed")
+        logger.warning("Evaluation reference provider request failed")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=error.detail,

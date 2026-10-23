@@ -2,19 +2,19 @@
 
 from dataclasses import dataclass
 from functools import lru_cache
-import os
 from urllib.parse import urlsplit
 
-from dotenv import load_dotenv
 from redis import Redis
 from rq import Queue
 from rq.serializers import JSONSerializer
 
+from app.api import config
 
-DEFAULT_REDIS_URL = "redis://localhost:6379/0"
-DEFAULT_EVALUATION_QUEUE = "employee-rag-evaluations"
-DEFAULT_JOB_TIMEOUT_SECONDS = 30 * 60
-DEFAULT_RESULT_TTL_SECONDS = 24 * 60 * 60
+
+DEFAULT_REDIS_URL = config.REDIS_URL
+DEFAULT_EVALUATION_QUEUE = config.REDIS_EVALUATION_QUEUE
+DEFAULT_JOB_TIMEOUT_SECONDS = config.REDIS_JOB_TIMEOUT_SECONDS
+DEFAULT_RESULT_TTL_SECONDS = config.REDIS_RESULT_TTL_SECONDS
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,25 +25,8 @@ class RedisSettings:
     result_ttl_seconds: int = DEFAULT_RESULT_TTL_SECONDS
 
     @classmethod
-    def from_env(cls) -> "RedisSettings":
-        load_dotenv()
-        url = os.getenv("REDIS_URL", DEFAULT_REDIS_URL).strip()
-        queue_name = os.getenv(
-            "REDIS_EVALUATION_QUEUE",
-            DEFAULT_EVALUATION_QUEUE,
-        ).strip()
-        settings = cls(
-            url=url or DEFAULT_REDIS_URL,
-            evaluation_queue=queue_name or DEFAULT_EVALUATION_QUEUE,
-            job_timeout_seconds=_positive_int_env(
-                "REDIS_JOB_TIMEOUT_SECONDS",
-                DEFAULT_JOB_TIMEOUT_SECONDS,
-            ),
-            result_ttl_seconds=_positive_int_env(
-                "REDIS_RESULT_TTL_SECONDS",
-                DEFAULT_RESULT_TTL_SECONDS,
-            ),
-        )
+    def from_config(cls) -> "RedisSettings":
+        settings = cls()
         settings.validate()
         return settings
 
@@ -55,22 +38,9 @@ class RedisSettings:
             )
 
 
-def _positive_int_env(name: str, default: int) -> int:
-    value = os.getenv(name, "").strip()
-    if not value:
-        return default
-    try:
-        parsed = int(value)
-    except ValueError as error:
-        raise ValueError(f"{name} must be an integer") from error
-    if parsed < 1:
-        raise ValueError(f"{name} must be at least 1")
-    return parsed
-
-
 @lru_cache(maxsize=1)
 def get_redis_settings() -> RedisSettings:
-    return RedisSettings.from_env()
+    return RedisSettings.from_config()
 
 
 @lru_cache(maxsize=1)

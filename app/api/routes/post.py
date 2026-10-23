@@ -14,6 +14,7 @@ from app.api.controllers.evaluation_jobs import (
     enqueue_evaluation_run,
 )
 from app.api.controllers.ingestion import start_ingestion
+from app.api.controllers.settings import save_provider_credential
 from app.api.routes.definition import ApiRoute
 from app.api.schemas.answer import AnswerResponse
 from app.api.schemas.data import DataUploadResponse
@@ -24,9 +25,18 @@ from app.api.schemas.evaluation import (
 )
 from app.api.schemas.ingestion import IngestionStartResponse
 from app.api.schemas.jobs import EvaluationJobAccepted
+from app.api.schemas.settings import ProviderCredentialResponse
 
 
 POST_ROUTES = (
+    ApiRoute(
+        name="save_provider_credential",
+        path="/settings/providers",
+        endpoint=save_provider_credential,
+        response_model=ProviderCredentialResponse,
+        status_code=HTTPStatus.CREATED,
+        tags=("settings",),
+    ),
     ApiRoute(
         name="upload_data",
         path="/data/upload",

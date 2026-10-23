@@ -1,6 +1,4 @@
-import os
 import unittest
-from unittest.mock import patch
 
 from langchain_core.messages import AIMessage, HumanMessage
 
@@ -56,7 +54,6 @@ class LLMUsageTests(unittest.TestCase):
         self.assertEqual(usage.total_tokens, 1_200)
         self.assertAlmostEqual(usage.estimated_cost_usd, 0.0191)
 
-    @patch.dict(os.environ, {}, clear=True)
     def test_returns_tokens_but_no_cost_when_pricing_is_unknown(self) -> None:
         response = AIMessage(content="Four words in this answer")
 
@@ -71,34 +68,6 @@ class LLMUsageTests(unittest.TestCase):
         self.assertGreater(usage.total_tokens, 0)
         self.assertIsNone(usage.estimated_cost_usd)
         self.assertEqual(usage.pricing_source, "unavailable")
-
-    @patch.dict(
-        os.environ,
-        {
-            "HF_INPUT_COST_PER_MILLION_USD": "0.10",
-            "HF_OUTPUT_COST_PER_MILLION_USD": "0.20",
-        },
-        clear=True,
-    )
-    def test_supports_environment_pricing_for_provider_routed_models(self) -> None:
-        response = AIMessage(
-            content="Answer",
-            usage_metadata={
-                "input_tokens": 100,
-                "output_tokens": 50,
-                "total_tokens": 150,
-            },
-        )
-
-        usage = calculate_llm_usage(
-            [HumanMessage(content="Question")],
-            response,
-            "huggingface",
-            "google/gemma-2-2b-it",
-        )
-
-        self.assertEqual(usage.pricing_source, "environment")
-        self.assertAlmostEqual(usage.estimated_cost_usd, 0.00002)
 
     def test_aggregate_exposes_unpriced_calls(self) -> None:
         priced = calculate_llm_usage(

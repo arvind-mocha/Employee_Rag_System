@@ -1,7 +1,6 @@
 """Concurrency-safe runner for the ingestion pipeline."""
 
 import logging
-import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from threading import Lock
@@ -10,6 +9,7 @@ from typing import Any, Literal, cast
 from redis import Redis
 from redis.exceptions import LockError
 
+from app.api import config
 from app.core.redis_client import get_redis_connection
 from app.ingestion.ingest import main as run_ingestion_pipeline
 
@@ -36,9 +36,7 @@ class IngestionSnapshot:
 def _safe_error_message(error: Exception) -> str:
     """Create a concise error message without exposing the database URL."""
     message = " ".join(str(error).split()) or "No error details were provided."
-    database_url = os.getenv("DATABASE_URL")
-    if database_url:
-        message = message.replace(database_url, "[DATABASE_URL hidden]")
+    message = message.replace(config.DATABASE_URL, "[DATABASE_URL hidden]")
     return f"{type(error).__name__}: {message}"[:1_000]
 
 

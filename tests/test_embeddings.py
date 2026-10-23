@@ -1,7 +1,7 @@
-import os
 import unittest
 from unittest.mock import Mock, patch
 
+from app.api import config
 from app.core.embeddings import (
     EmbeddingSettings,
     create_embedding_model,
@@ -10,36 +10,21 @@ from app.core.embeddings import (
 
 
 class EmbeddingSettingsTests(unittest.TestCase):
-    @patch.dict(
-        os.environ,
-        {
-            "EMBEDDING_MODEL": "sentence-transformers/test-model",
-            "EMBEDDING_BATCH_SIZE": "16",
-            "EMBEDDING_DEVICE": "cpu",
-        },
-    )
-    def test_loads_embedding_settings_from_environment(self) -> None:
-        settings = EmbeddingSettings.from_env()
+    def test_loads_central_embedding_configuration(self) -> None:
+        settings = EmbeddingSettings.from_config()
 
         self.assertEqual(
             settings,
             EmbeddingSettings(
-                model_name="sentence-transformers/test-model",
-                batch_size=16,
-                device="cpu",
+                model_name=config.EMBEDDING_MODEL,
+                batch_size=config.EMBEDDING_BATCH_SIZE,
+                device=config.EMBEDDING_DEVICE,
             ),
         )
 
-    @patch.dict(
-        os.environ,
-        {
-            "EMBEDDING_MODEL": "sentence-transformers/test-model",
-            "EMBEDDING_BATCH_SIZE": "0",
-        },
-    )
     def test_rejects_non_positive_batch_size(self) -> None:
         with self.assertRaisesRegex(ValueError, "must be at least 1"):
-            EmbeddingSettings.from_env()
+            EmbeddingSettings(batch_size=0)
 
 
 class EmbeddingModelTests(unittest.TestCase):

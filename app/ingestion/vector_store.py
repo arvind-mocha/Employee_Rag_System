@@ -19,7 +19,7 @@ def create_vector_store(
     recreate_table: bool = False,
 ) -> PGVectorStore:
     """Connect to the configured PGVector table, creating it when absent."""
-    settings = settings or PGVectorSettings.from_env()
+    settings = settings or PGVectorSettings.from_config()
     engine = create_pg_engine(settings)
 
     if not recreate_table:

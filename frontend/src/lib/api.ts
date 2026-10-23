@@ -4,11 +4,14 @@ import type {
   EvaluationJobAccepted,
   EvaluationJobStatus,
   Provider,
+  ProviderCredential,
+  ProviderCredentialListResponse,
+  ProviderCredentialRequest,
   RetrievalOptions,
   UploadEvaluationDatasetResponse,
 } from '../types/api'
 
-const API_ROOT = import.meta.env.VITE_API_ROOT ?? '/api/v1'
+const API_ROOT = '/api/v1'
 
 export class ApiError extends Error {
   status: number
@@ -52,10 +55,25 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ApiError(message, response.status)
   }
 
+  if (response.status === 204) return undefined as T
   return response.json() as Promise<T>
 }
 
 export const api = {
+  listProviderCredentials: () =>
+    request<ProviderCredentialListResponse>('/settings/providers'),
+
+  saveProviderCredential: (payload: ProviderCredentialRequest) =>
+    request<ProviderCredential>('/settings/providers', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  deleteProviderCredential: (provider: Provider) =>
+    request<void>(`/settings/providers/${provider}`, {
+      method: 'DELETE',
+    }),
+
   answer: (payload: AnswerRequest) =>
     request<AnswerResponse>('/answers/generate', {
       method: 'POST',

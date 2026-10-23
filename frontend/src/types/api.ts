@@ -1,5 +1,25 @@
 export type Provider = 'huggingface' | 'openai' | 'anthropic' | 'grok'
 
+export interface ProviderCredential {
+  provider: Provider
+  model_name: string
+  key_hint: string
+  expires_at: string
+  created_at: string
+  updated_at: string
+}
+
+export interface ProviderCredentialListResponse {
+  credentials: ProviderCredential[]
+}
+
+export interface ProviderCredentialRequest {
+  provider: Provider
+  model_name: string
+  api_key: string
+  expires_in_hours: number
+}
+
 export interface RetrievalOptions {
   semantic_search: boolean
   keyword_search: boolean
@@ -30,7 +50,7 @@ export interface LlmUsage {
   cache_creation_cost_per_million_usd: number | null
   output_cost_per_million_usd: number | null
   estimated_cost_usd: number | null
-  pricing_source: 'built_in' | 'environment' | 'unavailable'
+  pricing_source: 'built_in' | 'unavailable'
   currency: 'USD'
 }
 

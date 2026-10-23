@@ -60,7 +60,7 @@ def answer_question(request: AnswerRequest) -> AnswerResponse:
             detail=str(error),
         ) from error
     except LLMProviderRequestError as error:
-        logger.exception("LLM provider request failed")
+        logger.warning("LLM provider request failed for %s", provider.value)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=error.detail,

@@ -2,25 +2,28 @@
 
 from dataclasses import dataclass
 from enum import StrEnum
-from functools import lru_cache
-import os
 from typing import Any, Sequence
 
-from dotenv import load_dotenv
 from langchain_core.messages import BaseMessage
 from langchain_anthropic import ChatAnthropic
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint
 from langchain_openai import ChatOpenAI
 
+from app.api import config
 from app.api.llm_usage import LLMUsage, calculate_llm_usage
 from app.api.prompts import build_answer_messages
+from app.core.credential_store import (
+    CredentialStoreConfigurationError,
+    CredentialStoreUnavailable,
+    get_credential_store,
+)
 from app.retrieval.models import RetrievedChunk
 
 
 DEFAULT_HF_MODEL = "google/gemma-2-2b-it"
-DEFAULT_HF_PROVIDER = "auto"
-DEFAULT_GROK_BASE_URL = "https://api.x.ai/v1"
+DEFAULT_HF_PROVIDER = config.HUGGINGFACE_INFERENCE_PROVIDER
+DEFAULT_GROK_BASE_URL = config.GROK_BASE_URL
 MAX_ANSWER_TOKENS = 512
 MODEL_TIMEOUT_SECONDS = 120
 
@@ -58,31 +61,6 @@ class LLMSettings:
     grok_model: str = ""
     grok_base_url: str = DEFAULT_GROK_BASE_URL
 
-    @classmethod
-    def from_env(cls) -> "LLMSettings":
-        load_dotenv()
-        return cls(
-            hf_api_key=os.getenv("HF_API_KEY", "").strip(),
-            hf_model=(
-                os.getenv("HF_MODEL", DEFAULT_HF_MODEL).strip()
-                or DEFAULT_HF_MODEL
-            ),
-            hf_provider=(
-                os.getenv("HF_PROVIDER", DEFAULT_HF_PROVIDER).strip()
-                or DEFAULT_HF_PROVIDER
-            ),
-            openai_api_key=os.getenv("OPENAI_API_KEY", "").strip(),
-            openai_model=os.getenv("OPENAI_MODEL", "").strip(),
-            anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", "").strip(),
-            anthropic_model=os.getenv("ANTHROPIC_MODEL", "").strip(),
-            grok_api_key=os.getenv("GROK_API_KEY", "").strip(),
-            grok_model=os.getenv("GROK_MODEL", "").strip(),
-            grok_base_url=(
-                os.getenv("GROK_BASE_URL", DEFAULT_GROK_BASE_URL).strip()
-                or DEFAULT_GROK_BASE_URL
-            ),
-        )
-
     def model_for(self, provider: LLMProvider) -> str:
         models = {
             LLMProvider.HUGGINGFACE: self.hf_model,
@@ -94,29 +72,21 @@ class LLMSettings:
 
     def validate_provider(self, provider: LLMProvider) -> None:
         credentials = {
-            LLMProvider.HUGGINGFACE: ("HF_API_KEY", self.hf_api_key),
-            LLMProvider.OPENAI: ("OPENAI_API_KEY", self.openai_api_key),
-            LLMProvider.ANTHROPIC: (
-                "ANTHROPIC_API_KEY",
-                self.anthropic_api_key,
-            ),
-            LLMProvider.GROK: ("GROK_API_KEY", self.grok_api_key),
+            LLMProvider.HUGGINGFACE: self.hf_api_key,
+            LLMProvider.OPENAI: self.openai_api_key,
+            LLMProvider.ANTHROPIC: self.anthropic_api_key,
+            LLMProvider.GROK: self.grok_api_key,
         }
-        key_name, api_key = credentials[provider]
+        api_key = credentials[provider]
         if not api_key:
             raise LLMConfigurationError(
-                f"{key_name} must be set when using {provider.value}"
+                f"Configure an active {provider.value} API key on the Settings page."
             )
 
         model = self.model_for(provider)
         if not model:
-            model_name = {
-                LLMProvider.OPENAI: "OPENAI_MODEL",
-                LLMProvider.ANTHROPIC: "ANTHROPIC_MODEL",
-                LLMProvider.GROK: "GROK_MODEL",
-            }.get(provider, "HF_MODEL")
             raise LLMConfigurationError(
-                f"{model_name} must be set when using {provider.value}"
+                f"Configure a model name for {provider.value} on the Settings page."
             )
 
 
@@ -171,7 +141,7 @@ def create_chat_model_client(
     settings: LLMSettings | None = None,
 ) -> ChatModelClient:
     """Create the LangChain chat model configured for one provider."""
-    settings = settings or LLMSettings.from_env()
+    settings = settings or _stored_llm_settings(provider)
     settings.validate_provider(provider)
     model_name = settings.model_for(provider)
 
@@ -215,9 +185,49 @@ def create_chat_model_client(
     return ChatModelClient(provider, model_name, model)
 
 
-@lru_cache(maxsize=4)
 def get_chat_model_client(provider: LLMProvider) -> ChatModelClient:
+    """Build a client from the active, unexpired database credential."""
     return create_chat_model_client(provider)
+
+
+def _stored_llm_settings(provider: LLMProvider) -> LLMSettings:
+    try:
+        credential = get_credential_store().get_active(provider.value)
+    except (CredentialStoreConfigurationError, CredentialStoreUnavailable) as error:
+        raise LLMConfigurationError(str(error)) from error
+    if credential is None:
+        raise LLMConfigurationError(
+            f"Configure an active {provider.value} API key on the Settings page."
+        )
+
+    values = {
+        "hf_api_key": "",
+        "openai_api_key": "",
+        "anthropic_api_key": "",
+        "grok_api_key": "",
+    }
+    models = {
+        "hf_model": DEFAULT_HF_MODEL,
+        "openai_model": "",
+        "anthropic_model": "",
+        "grok_model": "",
+    }
+    key_field, model_field = {
+        LLMProvider.HUGGINGFACE: ("hf_api_key", "hf_model"),
+        LLMProvider.OPENAI: ("openai_api_key", "openai_model"),
+        LLMProvider.ANTHROPIC: ("anthropic_api_key", "anthropic_model"),
+        LLMProvider.GROK: ("grok_api_key", "grok_model"),
+    }[provider]
+    values[key_field] = credential.api_key
+    models[model_field] = credential.model_name
+    return LLMSettings(**values, **models)
+
+
+def _clear_client_cache() -> None:
+    """Compatibility hook retained now that clients are intentionally uncached."""
+
+
+get_chat_model_client.cache_clear = _clear_client_cache  # type: ignore[attr-defined]
 
 
 def _message_text(content: Any) -> str:
@@ -245,7 +255,7 @@ def _provider_error_detail(
         "sufficient permissions" in message or "403 forbidden" in message
     ):
         return (
-            "Hugging Face rejected HF_API_KEY. Create a fine-grained token "
+            "Hugging Face rejected its configured API key. Create a fine-grained token "
             "with permission to make calls to Inference Providers."
         )
     if "authentication" in message or "unauthorized" in message or "401" in message:
