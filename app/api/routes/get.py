@@ -5,13 +5,23 @@ from http import HTTPStatus
 from app.api.controllers.ingestion import get_ingestion_status
 from app.api.controllers.evaluation_jobs import get_evaluation_job
 from app.api.controllers.retrieval import retrieve_chunks
+from app.api.controllers.settings import list_provider_credentials
 from app.api.routes.definition import ApiRoute
 from app.api.schemas.ingestion import IngestionStatusResponse
 from app.api.schemas.jobs import EvaluationJobStatus
 from app.api.schemas.retrieval import RetrievalResponse
+from app.api.schemas.settings import ProviderCredentialListResponse
 
 
 GET_ROUTES = (
+    ApiRoute(
+        name="list_provider_credentials",
+        path="/settings/providers",
+        endpoint=list_provider_credentials,
+        response_model=ProviderCredentialListResponse,
+        status_code=HTTPStatus.OK,
+        tags=("settings",),
+    ),
     ApiRoute(
         name="get_ingestion_status",
         path="/ingestion/status",

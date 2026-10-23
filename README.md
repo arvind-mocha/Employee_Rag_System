@@ -52,6 +52,31 @@ Open `http://localhost:5173`. User mode provides a focused question-and-answer
 experience. Developer mode adds model and retrieval controls, retrieved chunks,
 request diagnostics, dataset generation, and on-demand evaluation dashboards.
 
+## Configure model providers
+
+Open `http://localhost:5173/settings` and add the API key, model ID, and expiry
+period for each provider that this installation should use. The API no longer
+loads provider keys or model names from `.env` during normal requests.
+
+Provider API keys are encrypted with AES-256-GCM before they are stored in the
+`provider_credentials` PostgreSQL table. API responses expose only the final
+four characters as a key hint. Expired credentials are rejected before use and
+deleted automatically; they can also be deleted immediately from the Settings
+page.
+
+On first use, local development creates a per-installation encryption key at
+`.secrets/credential_encryption_key`. This directory is ignored by Git. Do not
+commit, share, or delete that file while encrypted credentials still need to be
+read. For a container deployment, mount the same read-only secret file into the
+API and worker containers and set:
+
+```dotenv
+CREDENTIAL_ENCRYPTION_KEY_FILE=/run/secrets/credential_encryption_key
+```
+
+Deleting a credential from this application does not revoke it at the model
+provider. Revoke the key in the provider dashboard if it may be compromised.
+
 For evaluation jobs, PostgreSQL and Redis must be available and the background
 worker shown above must be running.
 

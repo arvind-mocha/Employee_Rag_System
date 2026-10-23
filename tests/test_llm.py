@@ -1,4 +1,4 @@
-import os
+from datetime import datetime, timedelta, timezone
 import unittest
 from unittest.mock import Mock, patch
 
@@ -16,6 +16,7 @@ from app.api.llm import (
     get_chat_model_client,
     select_provider,
 )
+from app.core.credential_store import ActiveCredential
 from app.retrieval.models import RetrievedChunk
 
 
@@ -46,9 +47,8 @@ class ProviderSelectionTests(unittest.TestCase):
 
 
 class LLMSettingsTests(unittest.TestCase):
-    @patch.dict(os.environ, {}, clear=True)
     def test_uses_the_cheap_huggingface_model_by_default(self) -> None:
-        settings = LLMSettings.from_env()
+        settings = LLMSettings(hf_api_key="test-key")
 
         self.assertEqual(settings.hf_model, DEFAULT_HF_MODEL)
         self.assertEqual(settings.hf_provider, "auto")
@@ -56,11 +56,30 @@ class LLMSettingsTests(unittest.TestCase):
     def test_requires_credentials_for_the_selected_provider(self) -> None:
         settings = LLMSettings(hf_api_key="")
 
-        with self.assertRaisesRegex(LLMConfigurationError, "HF_API_KEY"):
+        with self.assertRaisesRegex(LLMConfigurationError, "Settings page"):
             settings.validate_provider(LLMProvider.HUGGINGFACE)
 
 
 class ChatModelFactoryTests(unittest.TestCase):
+    @patch("app.api.llm.ChatOpenAI")
+    @patch("app.api.llm.get_credential_store")
+    def test_loads_runtime_credentials_from_postgres(
+        self,
+        get_store,
+        chat_class,
+    ) -> None:
+        get_store.return_value.get_active.return_value = ActiveCredential(
+            provider="openai",
+            model_name="database-model",
+            api_key="database-secret",
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        )
+
+        client = create_chat_model_client(LLMProvider.OPENAI)
+
+        self.assertEqual(client.model_name, "database-model")
+        self.assertEqual(chat_class.call_args.kwargs["api_key"], "database-secret")
+
     @patch("app.api.llm.ChatHuggingFace")
     @patch("app.api.llm.HuggingFaceEndpoint")
     def test_builds_the_huggingface_chat_model(

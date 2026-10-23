@@ -1,5 +1,6 @@
 import { FormEvent, useMemo, useState } from 'react'
-import { useMutation } from '@tanstack/react-query'
+import { useMutation, useQuery } from '@tanstack/react-query'
+import { Link } from 'react-router-dom'
 import {
   ArrowRight,
   BookOpenCheck,
@@ -9,6 +10,7 @@ import {
   Coins,
   Copy,
   FileText,
+  KeyRound,
   Search,
   Send,
   Settings2,
@@ -188,12 +190,31 @@ function RequestPanel({
 
 export function AskPage({ developerMode }: { developerMode: boolean }) {
   const [question, setQuestion] = useState('')
-  const [provider, setProvider] = useState<Provider>('huggingface')
+  const [providerOverride, setProviderOverride] = useState<Provider | null>(null)
   const [retrieval, setRetrieval] =
     useState<RetrievalOptions>(DEFAULT_RETRIEVAL)
   const [resultTab, setResultTab] = useState<ResultTab>('answer')
   const [lastRequest, setLastRequest] = useState<AnswerRequest | null>(null)
   const [latency, setLatency] = useState(0)
+
+  const credentialsQuery = useQuery({
+    queryKey: ['provider-credentials'],
+    queryFn: api.listProviderCredentials,
+  })
+  const configuredProviders = useMemo(
+    () =>
+      new Set(
+        credentialsQuery.data?.credentials.map((credential) => credential.provider) ?? [],
+      ),
+    [credentialsQuery.data?.credentials],
+  )
+  const defaultConfiguredProvider = PROVIDERS.find((item) =>
+    configuredProviders.has(item.id),
+  )?.id
+  const provider =
+    providerOverride && configuredProviders.has(providerOverride)
+      ? providerOverride
+      : defaultConfiguredProvider ?? 'huggingface'
 
   const answerMutation = useMutation({
     mutationFn: async (request: AnswerRequest) => {
@@ -208,7 +229,12 @@ export function AskPage({ developerMode }: { developerMode: boolean }) {
   })
 
   const response = answerMutation.data?.response
-  const canSubmit = question.trim().length > 0 && !answerMutation.isPending
+  const hasConfiguredProvider =
+    !credentialsQuery.isSuccess || configuredProviders.size > 0
+  const canSubmit =
+    question.trim().length > 0 &&
+    !answerMutation.isPending &&
+    hasConfiguredProvider
 
   const providerMeta = useMemo(
     () => PROVIDERS.find((item) => item.id === provider)!,
@@ -247,6 +273,16 @@ export function AskPage({ developerMode }: { developerMode: boolean }) {
 
       <div className={developerMode ? 'ask-layout developer' : 'ask-layout'}>
         <div className="ask-main">
+          {credentialsQuery.isSuccess && configuredProviders.size === 0 && (
+            <div className="provider-required-banner">
+              <KeyRound size={18} />
+              <span>
+                <strong>Connect a model provider to ask questions</strong>
+                <small>Add an API key, model name, and automatic expiry time.</small>
+              </span>
+              <Link to="/settings">Open settings</Link>
+            </div>
+          )}
           <form className="question-box" onSubmit={submit}>
             <Search size={20} />
             <textarea
@@ -352,21 +388,27 @@ export function AskPage({ developerMode }: { developerMode: boolean }) {
                 <i className="cheap-badge">HF default</i>
               </div>
               <div className="provider-radio-list">
-                {PROVIDERS.map((item) => (
-                  <button
-                    type="button"
-                    key={item.id}
-                    className={provider === item.id ? 'selected' : ''}
-                    onClick={() => setProvider(item.id)}
-                  >
-                    <i>{item.shortName}</i>
-                    <span>
-                      <strong>{item.name}</strong>
-                      <small>{item.description}</small>
-                    </span>
-                    <b />
-                  </button>
-                ))}
+                {PROVIDERS.map((item) => {
+                  const configured = configuredProviders.has(item.id)
+                  return (
+                    <button
+                      type="button"
+                      key={item.id}
+                      className={provider === item.id ? 'selected' : ''}
+                      onClick={() => setProviderOverride(item.id)}
+                      disabled={credentialsQuery.isSuccess && !configured}
+                    >
+                      <i>{item.shortName}</i>
+                      <span>
+                        <strong>{item.name}</strong>
+                        <small>
+                          {configured ? item.description : 'Not configured'}
+                        </small>
+                      </span>
+                      <b />
+                    </button>
+                  )
+                })}
               </div>
             </section>
 

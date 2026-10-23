@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useState } from 'react'
-import { BarChart3, MessageSquareText } from 'lucide-react'
+import { BarChart3, MessageSquareText, Settings } from 'lucide-react'
 import {
   NavLink,
   Navigate,
@@ -15,6 +15,12 @@ import { AskPage } from './pages/AskPage'
 const EvaluationPage = lazy(() =>
   import('./pages/EvaluationPage').then((module) => ({
     default: module.EvaluationPage,
+  })),
+)
+
+const SettingsPage = lazy(() =>
+  import('./pages/SettingsPage').then((module) => ({
+    default: module.SettingsPage,
   })),
 )
 
@@ -60,6 +66,10 @@ export default function App() {
                 Evaluation
               </NavLink>
             )}
+            <NavLink to="/settings">
+              <Settings size={17} />
+              Settings
+            </NavLink>
           </nav>
 
           <ModeSwitch
@@ -88,6 +98,20 @@ export default function App() {
               ) : (
                 <Navigate to="/" replace />
               )
+            }
+          />
+          <Route
+            path="/settings"
+            element={
+              <Suspense
+                fallback={
+                  <div className="route-loading">
+                    <i className="spinner dark" /> Loading settings…
+                  </div>
+                }
+              >
+                <SettingsPage />
+              </Suspense>
             }
           />
           <Route path="*" element={<Navigate to="/" replace />} />

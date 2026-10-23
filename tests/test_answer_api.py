@@ -146,7 +146,7 @@ class AnswerApiTests(unittest.TestCase):
     ) -> None:
         get_query_router.return_value.search.return_value = [retrieved_chunk()]
         generate_answer.side_effect = LLMConfigurationError(
-            "OPENAI_API_KEY must be set when using openai"
+            "Configure an active openai API key on the Settings page."
         )
 
         response = self.client.post(
@@ -155,7 +155,7 @@ class AnswerApiTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 503)
-        self.assertIn("OPENAI_API_KEY", response.json()["detail"])
+        self.assertIn("Settings page", response.json()["detail"])
 
     @patch("app.api.controllers.answer.generate_grounded_answer")
     @patch("app.api.controllers.answer.get_query_router")
@@ -170,7 +170,7 @@ class AnswerApiTests(unittest.TestCase):
             "Hugging Face token needs Inference Providers permission.",
         )
 
-        with self.assertLogs("app.api.controllers.answer", level="ERROR"):
+        with self.assertLogs("app.api.controllers.answer", level="WARNING"):
             response = self.client.post(
                 "/api/v1/answers/generate",
                 json={"question": "Vacation policy?"},
