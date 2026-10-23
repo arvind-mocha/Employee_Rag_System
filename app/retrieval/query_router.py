@@ -41,6 +41,30 @@ class RetrievalOptions:
         if not self.semantic_search and not self.keyword_search:
             raise ValueError("at least one retrieval strategy must be enabled")
 
+    def effective_query(self, question: str) -> str:
+        normalized_question = WHITESPACE_PATTERN.sub(" ", question).strip()
+        if not normalized_question:
+            raise ValueError("question must not be empty")
+        if self.query_rewriting:
+            return rewrite_query(normalized_question)
+        return normalized_question
+
+    def applied_strategies(self) -> list[str]:
+        strategies = []
+        if self.semantic_search:
+            strategies.append("semantic_search")
+        if self.keyword_search:
+            strategies.append("keyword_search")
+        if self.semantic_search and self.keyword_search:
+            strategies.append("hybrid_fusion")
+        if self.query_rewriting:
+            strategies.append("query_rewriting")
+        if self.reranking:
+            strategies.append("reranking")
+        if self.source_diversity:
+            strategies.append("source_diversity")
+        return strategies
+
 
 def rewrite_query(question: str) -> str:
     """Create a concise search query without calling a generative model."""
@@ -76,15 +100,7 @@ class QueryRouter:
         options: RetrievalOptions | None = None,
     ) -> list[RetrievedChunk]:
         options = options or RetrievalOptions()
-        normalized_question = WHITESPACE_PATTERN.sub(" ", question).strip()
-        if not normalized_question:
-            raise ValueError("question must not be empty")
-
-        search_query = (
-            rewrite_query(normalized_question)
-            if options.query_rewriting
-            else normalized_question
-        )
+        search_query = options.effective_query(question)
         use_candidates = options.reranking or options.source_diversity
         search_limit = (
             RETRIEVAL_SETTINGS.number_of_candidates

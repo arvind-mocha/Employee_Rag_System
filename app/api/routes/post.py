@@ -2,9 +2,11 @@
 
 from http import HTTPStatus
 
+from app.api.controllers.answer import answer_question
 from app.api.controllers.data import upload_data
 from app.api.controllers.ingestion import start_ingestion
 from app.api.routes.definition import ApiRoute
+from app.api.schemas.answer import AnswerResponse
 from app.api.schemas.data import DataUploadResponse
 from app.api.schemas.ingestion import IngestionStartResponse
 
@@ -25,5 +27,13 @@ POST_ROUTES = (
         response_model=IngestionStartResponse,
         status_code=HTTPStatus.ACCEPTED,
         tags=("ingestion",),
+    ),
+    ApiRoute(
+        name="answer_question",
+        path="/answers/generate",
+        endpoint=answer_question,
+        response_model=AnswerResponse,
+        status_code=HTTPStatus.OK,
+        tags=("answers",),
     ),
 )

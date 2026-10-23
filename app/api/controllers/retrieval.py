@@ -14,7 +14,6 @@ from app.retrieval.config import RETRIEVAL_SETTINGS
 from app.retrieval.query_router import (
     RetrievalOptions,
     get_query_router,
-    rewrite_query,
 )
 
 
@@ -59,28 +58,10 @@ def retrieve_chunks(
         )
         for chunk in chunks
     ]
-    applied_strategies = []
-    if options.semantic_search:
-        applied_strategies.append("semantic_search")
-    if options.keyword_search:
-        applied_strategies.append("keyword_search")
-    if options.semantic_search and options.keyword_search:
-        applied_strategies.append("hybrid_fusion")
-    if options.query_rewriting:
-        applied_strategies.append("query_rewriting")
-    if options.reranking:
-        applied_strategies.append("reranking")
-    if options.source_diversity:
-        applied_strategies.append("source_diversity")
-
     return RetrievalResponse(
         question=request.question,
-        effective_query=(
-            rewrite_query(request.question)
-            if options.query_rewriting
-            else request.question
-        ),
-        applied_strategies=applied_strategies,
+        effective_query=options.effective_query(request.question),
+        applied_strategies=options.applied_strategies(),
         requested_chunks=RETRIEVAL_SETTINGS.number_of_chunks,
         returned_chunks=len(response_chunks),
         chunks=response_chunks,
