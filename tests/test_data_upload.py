@@ -33,12 +33,17 @@ class DataUploadTests(unittest.TestCase):
                 self.structured_data_directory,
             ),
         ]
+        self.ingestion_runner_patch = patch(
+            "app.api.controllers.data.ingestion_runner"
+        )
         for current_patch in self.patches:
             current_patch.start()
+        self.ingestion_runner = self.ingestion_runner_patch.start()
 
         self.client = TestClient(app)
 
     def tearDown(self) -> None:
+        self.ingestion_runner_patch.stop()
         for current_patch in reversed(self.patches):
             current_patch.stop()
         self.temporary_directory.cleanup()
@@ -64,6 +69,7 @@ class DataUploadTests(unittest.TestCase):
         self.assertTrue((self.data_directory / "readme.md").is_file())
         self.assertTrue((self.structured_data_directory / "list.csv").is_file())
         self.assertTrue((self.structured_data_directory / "settings.json").is_file())
+        self.ingestion_runner.mark_data_changed.assert_called_once_with()
 
     def test_rejects_a_non_zip_upload(self) -> None:
         response = self.client.post(
@@ -73,6 +79,7 @@ class DataUploadTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertFalse(self.data_directory.exists())
+        self.ingestion_runner.mark_data_changed.assert_not_called()
 
     def test_rejects_an_unsupported_file_type(self) -> None:
         response = self.client.post(

@@ -1,8 +1,11 @@
 import type {
   AnswerRequest,
   AnswerResponse,
+  DataUploadResponse,
   EvaluationJobAccepted,
   EvaluationJobStatus,
+  IngestionStartResponse,
+  IngestionStatusResponse,
   Provider,
   ProviderCredential,
   ProviderCredentialListResponse,
@@ -79,6 +82,23 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
+
+  uploadData: (zipFile: File) => {
+    const form = new FormData()
+    form.append('zip_file', zipFile)
+    return request<DataUploadResponse>('/data/upload', {
+      method: 'POST',
+      body: form,
+    })
+  },
+
+  startIngestion: () =>
+    request<IngestionStartResponse>('/ingestion/start', {
+      method: 'POST',
+    }),
+
+  getIngestionStatus: () =>
+    request<IngestionStatusResponse>('/ingestion/status'),
 
   generateDataset: (payload: {
     dataset_name: string

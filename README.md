@@ -47,6 +47,17 @@ Open `http://localhost:5173`. User mode provides a focused question-and-answer
 experience. Developer mode adds model and retrieval controls, retrieved chunks,
 request diagnostics, dataset generation, and on-demand evaluation dashboards.
 
+## Upload and ingest company data
+
+Open the **Data** page in Developer mode, choose a ZIP file, click **Upload ZIP**,
+and then click **Start ingestion**. The page accepts PDF, DOCX, TXT, Markdown,
+CSV, JSON, and XLSX files inside ZIP archives up to 50 MB and displays the live
+ingestion status.
+
+The chat screen stays unavailable until ingestion finishes successfully. A later
+data upload resets readiness, so the new files must be ingested before chat is
+unlocked again.
+
 ## Configure model providers
 
 Open `http://localhost:5173/settings` and add the API key, model ID, and expiry
@@ -75,9 +86,10 @@ provider. Revoke the key in the provider dashboard if it may be compromised.
 For evaluation jobs, PostgreSQL and Redis must be available and the background
 worker shown above must be running.
 
-Ingestion locking and status are stored in Redis, so they survive API restarts
-and are shared across API workers. Redis is not used for document or vector
-storage; those remain in PostgreSQL/PGVector.
+Ingestion locking and status are stored in Redis, so they survive API restarts,
+remain available for the frontend readiness check, and are shared across API
+workers. Redis is not used for document or vector storage; those remain in
+PostgreSQL/PGVector.
 
 ## LLM token usage and approximate cost
 

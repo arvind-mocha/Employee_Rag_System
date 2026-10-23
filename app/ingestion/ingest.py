@@ -1,14 +1,10 @@
 import logging
 
+from app.api import config
 from app.ingestion.cleaner import clean_documents
 from app.ingestion.chunker import DocumentChunk, chunk_all_data
 from app.core.embeddings import EmbeddingSettings, create_embedding_model
 from app.ingestion.vector_store import create_vector_store, index_chunks
-
-
-DOCUMENTS_DIRECTORY = "data"
-STRUCTURED_DATA_DIRECTORY = "structured_data"
-TEMP_DIRECTORY = "temp_data"
 
 # Chunk size and overlap are measured in words.
 CHUNK_SIZE = 512
@@ -21,8 +17,8 @@ MAX_WORKERS = 4
 # Process 1: Clean documents
 def process_1():
     return clean_documents(
-        input_directory=DOCUMENTS_DIRECTORY,
-        output_directory=TEMP_DIRECTORY,
+        input_directory=config.DATA_DIRECTORY,
+        output_directory=config.TEMP_DATA_DIRECTORY,
         batch_size=CLEANING_BATCH_SIZE,
         max_workers=MAX_WORKERS,
         overwrite=True,
@@ -32,8 +28,8 @@ def process_1():
 # Process 2: Chunk documents
 def process_2():
     return chunk_all_data(
-        markdown_directory=TEMP_DIRECTORY,
-        structured_directory=STRUCTURED_DATA_DIRECTORY,
+        markdown_directory=config.TEMP_DATA_DIRECTORY,
+        structured_directory=config.STRUCTURED_DATA_DIRECTORY,
         chunk_size=CHUNK_SIZE,
         chunk_overlap=CHUNK_OVERLAP,
         batch_size=CHUNKING_BATCH_SIZE,

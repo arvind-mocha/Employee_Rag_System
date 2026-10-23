@@ -115,6 +115,7 @@ class RedisIngestionStateTests(unittest.TestCase):
 
         pipeline.assert_called_once_with()
         self.assertGreaterEqual(redis_client.hset.call_count, 3)
+        self.assertGreaterEqual(redis_client.persist.call_count, 3)
         distributed_lock.release.assert_called_once_with()
 
     def test_reads_ingestion_state_from_redis(self) -> None:
@@ -131,6 +132,22 @@ class RedisIngestionStateTests(unittest.TestCase):
         self.assertEqual(snapshot.status, "completed")
         self.assertIsNotNone(snapshot.started_at)
         self.assertIsNotNone(snapshot.finished_at)
+        redis_client.persist.assert_called_once_with(
+            "employee-rag:ingestion:state"
+        )
+
+    def test_new_data_invalidates_a_completed_run(self) -> None:
+        redis_client = Mock()
+        runner = IngestionRunner(redis_client)
+
+        runner.mark_data_changed()
+
+        redis_client.hset.assert_called_once()
+        state_mapping = redis_client.hset.call_args.kwargs["mapping"]
+        self.assertEqual(state_mapping["status"], "idle")
+        redis_client.persist.assert_called_once_with(
+            "employee-rag:ingestion:state"
+        )
 
 
 if __name__ == "__main__":

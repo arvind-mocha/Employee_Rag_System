@@ -19,7 +19,6 @@ logger = logging.getLogger(__name__)
 IngestionState = Literal["idle", "pending", "running", "completed", "failed"]
 INGESTION_STATE_KEY = "employee-rag:ingestion:state"
 INGESTION_LOCK_KEY = "employee-rag:ingestion:lock"
-INGESTION_STATE_TTL_SECONDS = 7 * 24 * 60 * 60
 INGESTION_LOCK_TTL_SECONDS = 6 * 60 * 60
 
 
@@ -109,6 +108,9 @@ class IngestionRunner:
             values = self._redis.hgetall(INGESTION_STATE_KEY)
             if not values:
                 return IngestionSnapshot("idle", None, None, None)
+            # Clear the legacy seven-day TTL when an installation first runs
+            # this version, without requiring another ingestion run.
+            self._redis.persist(INGESTION_STATE_KEY)
             decoded = {
                 _decode(key): _decode(value) for key, value in values.items()
             }
@@ -126,6 +128,18 @@ class IngestionRunner:
                 started_at=self._started_at,
                 finished_at=self._finished_at,
             )
+
+    def mark_data_changed(self) -> None:
+        """Invalidate a completed run after source documents are uploaded."""
+        if self._redis is not None:
+            self._write_redis_state("idle")
+            return
+
+        with self._state_lock:
+            self._status = "idle"
+            self._error = None
+            self._started_at = None
+            self._finished_at = None
 
     def _run_with_redis(self) -> None:
         started_at = datetime.now(timezone.utc)
@@ -173,10 +187,9 @@ class IngestionRunner:
                 "finished_at": finished_at.isoformat() if finished_at else "",
             },
         )
-        self._redis.expire(
-            INGESTION_STATE_KEY,
-            INGESTION_STATE_TTL_SECONDS,
-        )
+        # Readiness gates the chat UI, so the latest result must survive longer
+        # than a cache TTL. Redis persistence keeps it across app restarts.
+        self._redis.persist(INGESTION_STATE_KEY)
 
 
 def _decode(value: Any) -> str:
