@@ -211,6 +211,7 @@ tempCodeRunnerFile.py
 /data/
 /structured_data/
 /temp_data/
+/evaluation_data/
 
 # Ruff stuff:
 .ruff_cache/
