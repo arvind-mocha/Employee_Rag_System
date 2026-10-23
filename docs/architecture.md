@@ -64,6 +64,24 @@ flowchart TB
 | Redis | Distributed ingestion lock, persistent ingestion status, job queues, and temporary evaluation results |
 | Local filesystem | Uploaded source files, cleaned intermediate data, evaluation JSONL, and the installation key |
 
+## Repository layout
+
+```text
+Employee_Rag_System/
+├── app/
+│   ├── api/                 # FastAPI routes, controllers, schemas, and worker
+│   ├── core/                # Embeddings, PGVector, Redis, and credentials
+│   ├── ingestion/           # Extraction, cleaning, chunking, and indexing
+│   ├── retrieval/           # Semantic, keyword, fusion, and reranking logic
+│   └── evaluation/          # Datasets, metrics, jobs, judging, and reports
+├── docs/                    # Detailed project documentation
+├── frontend/src/            # React pages, components, API client, and styles
+├── tests/                   # Backend unit and API tests
+├── docker-compose.yml       # PostgreSQL/PGVector and Redis
+├── pyproject.toml           # Python dependencies and command entry points
+└── README.md                # Project overview and quick start
+```
+
 ## Ingestion flow
 
 1. The frontend sends a multipart ZIP to `POST /api/v1/data/upload`.
