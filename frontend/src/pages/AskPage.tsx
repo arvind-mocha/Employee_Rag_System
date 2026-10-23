@@ -1,10 +1,13 @@
 import { FormEvent, useMemo, useState } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import {
   ArrowRight,
   BookOpenCheck,
   CheckCircle2,
+  ChevronDown,
   ChevronRight,
   Clock3,
   Coins,
@@ -34,7 +37,7 @@ import type {
   RetrievalOptions,
 } from '../types/api'
 
-type ResultTab = 'answer' | 'chunks' | 'request'
+type ResultTab = 'answer' | 'request'
 
 const EXAMPLE_QUESTIONS = [
   'How many vacation days do employees receive?',
@@ -84,9 +87,7 @@ function AnswerPanel({ response }: { response: AnswerResponse }) {
         </button>
       </div>
       <div className="answer-copy">
-        {response.answer.split('\n').map((paragraph, index) =>
-          paragraph ? <p key={`${paragraph.slice(0, 16)}-${index}`}>{paragraph}</p> : null,
-        )}
+        <ReactMarkdown remarkPlugins={[remarkGfm]}>{response.answer}</ReactMarkdown>
       </div>
       {response.sources.length > 0 && (
         <div className="answer-source-strip">
@@ -100,43 +101,108 @@ function AnswerPanel({ response }: { response: AnswerResponse }) {
 }
 
 function ChunkPanel({ response }: { response: AnswerResponse }) {
+  const [expandedChunk, setExpandedChunk] = useState<number | null>(null)
+
   if (!response.sources.length) {
-    return <div className="empty-panel">No chunks were returned for this question.</div>
+    return (
+      <section className="developer-chunks">
+        <div className="developer-chunks-heading">
+          <div>
+            <span>Retrieved evidence</span>
+            <small>No chunks were returned for this question.</small>
+          </div>
+        </div>
+      </section>
+    )
   }
 
   return (
-    <div className="chunk-list">
-      {response.sources.map((chunk, index) => (
-        <article className="chunk-card" key={chunk.chunk_id ?? `chunk-${index}`}>
-          <div className="chunk-rank">{String(index + 1).padStart(2, '0')}</div>
-          <div className="chunk-body">
-            <div className="chunk-meta">
-              <span className="file-pill">
-                <FileText size={13} />
-                {chunk.source_file ?? 'Unknown source'}
-              </span>
-              {chunk.section && <span>{chunk.section}</span>}
-              {chunk.chunk_index != null && <span>Chunk {chunk.chunk_index}</span>}
-            </div>
-            <p>{chunk.content}</p>
-            <div className="chunk-footer">
-              <code>{chunk.chunk_id ?? 'No chunk ID'}</code>
-              <div className="score-meter">
-                <span>Relevance</span>
-                <i>
-                  <b
-                    style={{
-                      width: `${Math.max(0, Math.min(100, chunk.relevance_score * 100))}%`,
-                    }}
-                  />
-                </i>
-                <strong>{Math.round(chunk.relevance_score * 100)}%</strong>
-              </div>
-            </div>
-          </div>
-        </article>
-      ))}
-    </div>
+    <section className="developer-chunks">
+      <div className="developer-chunks-heading">
+        <div>
+          <span>Retrieved evidence</span>
+          <small>Open a chunk to inspect its content and retrieval metadata.</small>
+        </div>
+        <b>{response.sources.length} chunks</b>
+      </div>
+      <div className="chunk-list">
+        {response.sources.map((chunk, index) => {
+          const expanded = expandedChunk === index
+          const panelId = `retrieved-chunk-${index + 1}`
+          const relevance = Math.max(
+            0,
+            Math.min(100, chunk.relevance_score * 100),
+          )
+
+          return (
+            <article
+              className={expanded ? 'chunk-card expanded' : 'chunk-card'}
+              key={`${chunk.chunk_id ?? 'chunk'}-${index}`}
+            >
+              <button
+                className="chunk-summary"
+                type="button"
+                aria-expanded={expanded}
+                aria-controls={panelId}
+                onClick={() => setExpandedChunk(expanded ? null : index)}
+              >
+                <span className="chunk-rank">Chunk {index + 1}</span>
+                <span className="chunk-source">
+                  <FileText size={14} />
+                  {chunk.source_file ?? 'Unknown source'}
+                </span>
+                <span className="chunk-summary-score">
+                  <span>Relevance</span>
+                  <i aria-hidden="true">
+                    <b style={{ width: `${relevance}%` }} />
+                  </i>
+                  <strong>{Math.round(relevance)}%</strong>
+                </span>
+                <ChevronDown className="chunk-chevron" size={17} />
+              </button>
+              {expanded && (
+                <div className="chunk-details" id={panelId} role="region">
+                  <div className="chunk-information-grid">
+                    <div>
+                      <span>Retrieval rank</span>
+                      <strong>{index + 1}</strong>
+                    </div>
+                    <div>
+                      <span>Relevance score</span>
+                      <strong>{chunk.relevance_score.toFixed(4)}</strong>
+                    </div>
+                    <div>
+                      <span>Source file</span>
+                      <strong>{chunk.source_file ?? 'Not available'}</strong>
+                    </div>
+                    <div>
+                      <span>Source type</span>
+                      <strong>{chunk.source_type ?? 'Not available'}</strong>
+                    </div>
+                    <div>
+                      <span>Section</span>
+                      <strong>{chunk.section ?? 'Not available'}</strong>
+                    </div>
+                    <div>
+                      <span>Stored chunk index</span>
+                      <strong>{chunk.chunk_index ?? 'Not available'}</strong>
+                    </div>
+                  </div>
+                  <div className="chunk-identifier">
+                    <span>Chunk ID</span>
+                    <code>{chunk.chunk_id ?? 'Not available'}</code>
+                  </div>
+                  <div className="chunk-content">
+                    <span>Full chunk content</span>
+                    <p>{chunk.content}</p>
+                  </div>
+                </div>
+              )}
+            </article>
+          )
+        })}
+      </div>
+    </section>
   )
 }
 
@@ -354,13 +420,6 @@ export function AskPage({ developerMode }: { developerMode: boolean }) {
                   </button>
                   <button
                     type="button"
-                    className={resultTab === 'chunks' ? 'active' : ''}
-                    onClick={() => setResultTab('chunks')}
-                  >
-                    Retrieved chunks <span>{response.sources.length}</span>
-                  </button>
-                  <button
-                    type="button"
                     className={resultTab === 'request' ? 'active' : ''}
                     onClick={() => setResultTab('request')}
                   >
@@ -368,8 +427,12 @@ export function AskPage({ developerMode }: { developerMode: boolean }) {
                   </button>
                 </div>
               )}
-              {visibleResultTab === 'answer' && <AnswerPanel response={response} />}
-              {visibleResultTab === 'chunks' && <ChunkPanel response={response} />}
+              {visibleResultTab === 'answer' && (
+                <>
+                  <AnswerPanel response={response} />
+                  {developerMode && <ChunkPanel response={response} />}
+                </>
+              )}
               {visibleResultTab === 'request' && (
                 <RequestPanel request={lastRequest} response={response} latency={latency} />
               )}
