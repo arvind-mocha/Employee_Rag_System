@@ -1,5 +1,5 @@
 import { lazy, Suspense, useEffect, useState } from 'react'
-import { BarChart3, MessageSquareText, Settings } from 'lucide-react'
+import { BarChart3, DatabaseZap, MessageSquareText, Settings } from 'lucide-react'
 import {
   NavLink,
   Navigate,
@@ -10,7 +10,14 @@ import {
 } from 'react-router-dom'
 import { BrandMark } from './components/BrandMark'
 import { ModeSwitch } from './components/ModeSwitch'
+import { useIngestionStatus } from './hooks/useIngestionStatus'
 import { AskPage } from './pages/AskPage'
+
+const DataPage = lazy(() =>
+  import('./pages/DataPage').then((module) => ({
+    default: module.DataPage,
+  })),
+)
 
 const EvaluationPage = lazy(() =>
   import('./pages/EvaluationPage').then((module) => ({
@@ -26,6 +33,32 @@ const SettingsPage = lazy(() =>
 
 function readInitialMode() {
   return window.localStorage.getItem('employee-rag-mode') === 'developer'
+}
+
+function dataPageFallback(message: string) {
+  return (
+    <div className="route-loading">
+      <i className="spinner dark" /> {message}
+    </div>
+  )
+}
+
+function ChatRoute({ developerMode }: { developerMode: boolean }) {
+  const ingestionQuery = useIngestionStatus()
+
+  if (ingestionQuery.isLoading) {
+    return dataPageFallback('Checking knowledge base…')
+  }
+
+  if (ingestionQuery.data?.status !== 'completed') {
+    return (
+      <Suspense fallback={dataPageFallback('Loading data setup…')}>
+        <DataPage />
+      </Suspense>
+    )
+  }
+
+  return <AskPage developerMode={developerMode} />
 }
 
 export default function App() {
@@ -61,10 +94,16 @@ export default function App() {
               Ask
             </NavLink>
             {developerMode && (
-              <NavLink to="/evaluation">
-                <BarChart3 size={17} />
-                Evaluation
-              </NavLink>
+              <>
+                <NavLink to="/data">
+                  <DatabaseZap size={17} />
+                  Data
+                </NavLink>
+                <NavLink to="/evaluation">
+                  <BarChart3 size={17} />
+                  Evaluation
+                </NavLink>
+              </>
             )}
             <NavLink to="/settings">
               <Settings size={17} />
@@ -81,7 +120,15 @@ export default function App() {
 
       <main>
         <Routes>
-          <Route path="/" element={<AskPage developerMode={developerMode} />} />
+          <Route path="/" element={<ChatRoute developerMode={developerMode} />} />
+          <Route
+            path="/data"
+            element={
+              <Suspense fallback={dataPageFallback('Loading data setup…')}>
+                <DataPage />
+              </Suspense>
+            }
+          />
           <Route
             path="/evaluation"
             element={

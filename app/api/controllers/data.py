@@ -1,12 +1,18 @@
 """HTTP handlers for data operations."""
 
+import logging
 from typing import Annotated
 
 from fastapi import File, HTTPException, UploadFile
+from redis.exceptions import RedisError
 
 from app.api import config
 from app.api.schemas.data import DataUploadResponse
+from app.api.services.ingestion_runner import ingestion_runner
 from app.api.services.zip_storage import ZipStorageError, store_zip_archive
+
+
+logger = logging.getLogger(__name__)
 
 
 async def upload_data(
@@ -28,6 +34,16 @@ async def upload_data(
             status_code=error.status_code,
             detail=error.detail,
         ) from error
+
+    try:
+        ingestion_runner.mark_data_changed()
+    except (RedisError, OSError):
+        # The upload is already committed. Keep the successful response and let
+        # the status endpoint continue to report Redis availability separately.
+        logger.warning(
+            "Uploaded data was stored but ingestion readiness could not be reset",
+            exc_info=True,
+        )
 
     return DataUploadResponse(
         message="ZIP uploaded and extracted successfully.",

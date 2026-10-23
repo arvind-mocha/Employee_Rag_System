@@ -20,6 +20,33 @@ export interface ProviderCredentialRequest {
   expires_in_hours: number
 }
 
+export interface DataUploadResponse {
+  message: string
+  total_files: number
+  structured_files: string[]
+  unstructured_files: string[]
+}
+
+export type IngestionState =
+  | 'idle'
+  | 'pending'
+  | 'running'
+  | 'completed'
+  | 'failed'
+
+export interface IngestionStatusResponse {
+  status: IngestionState
+  error: string | null
+  started_at: string | null
+  finished_at: string | null
+}
+
+export interface IngestionStartResponse {
+  message: string
+  status: 'accepted'
+  status_url: string
+}
+
 export interface RetrievalOptions {
   semantic_search: boolean
   keyword_search: boolean
