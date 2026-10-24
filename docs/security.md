@@ -60,11 +60,11 @@ The upload service protects against common archive problems by:
 - Rejecting non-ZIP content
 - Rejecting absolute paths and `..` traversal
 - Flattening archive folders to controlled destination directories
-- Rejecting duplicate flattened filenames
-- Rejecting unsupported file extensions
+- Ignoring unsupported file extensions while requiring at least one supported file
+- Renaming duplicate flattened filenames with a numeric suffix
 - Limiting compressed size, extracted size, and file count
 - Testing archives for corrupt members before extraction
-- Refusing to overwrite an existing filename
+- Preserving existing files and renaming incoming filename collisions
 - Staging extraction before moving validated files into data directories
 
 The system does not provide malware scanning or content moderation. Add an
@@ -105,6 +105,8 @@ Therefore:
   multi-user deployment.
 - Restrict Settings, Data, and Evaluation operations to administrators or
   developers.
+- Protect `DELETE /api/v1/data/vector-database`; it erases all indexed chunks
+  for the installation even though source files and credentials are preserved.
 
 The User/Developer switch is a UI feature, not a security boundary.
 

@@ -89,3 +89,15 @@ def connect_vector_store(
     settings = settings or PGVectorSettings.from_config()
     engine = create_pg_engine(settings)
     return open_vector_store(engine, embedding_model, settings)
+
+
+def drop_vector_store_table(
+    settings: PGVectorSettings | None = None,
+) -> None:
+    """Erase the configured vector table without touching other database data."""
+    settings = settings or PGVectorSettings.from_config()
+    engine = create_pg_engine(settings)
+    engine.drop_table(
+        table_name=settings.table_name,
+        schema_name=settings.schema_name,
+    )

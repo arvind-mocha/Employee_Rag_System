@@ -141,6 +141,30 @@ class IngestionRunner:
             self._started_at = None
             self._finished_at = None
 
+    def finish_maintenance(self, error: Exception | None = None) -> None:
+        """Finish a non-ingestion operation that used ``reserve`` for safety."""
+        if self._redis is not None:
+            try:
+                if error is None:
+                    self._write_redis_state("idle")
+                else:
+                    self._write_redis_state(
+                        "failed",
+                        error=_safe_error_message(error),
+                        finished_at=datetime.now(timezone.utc),
+                    )
+            finally:
+                self._release_distributed_lock()
+            return
+
+        with self._state_lock:
+            self._status = "idle" if error is None else "failed"
+            self._error = _safe_error_message(error) if error else None
+            self._started_at = None
+            self._finished_at = (
+                datetime.now(timezone.utc) if error is not None else None
+            )
+
     def _run_with_redis(self) -> None:
         started_at = datetime.now(timezone.utc)
         self._write_redis_state("running", started_at=started_at)
@@ -161,12 +185,16 @@ class IngestionRunner:
                 finished_at=datetime.now(timezone.utc),
             )
         finally:
-            if self._distributed_lock is not None:
-                try:
-                    self._distributed_lock.release()
-                except LockError:
-                    logger.warning("The Redis ingestion lock expired before release")
-                self._distributed_lock = None
+            self._release_distributed_lock()
+
+    def _release_distributed_lock(self) -> None:
+        if self._distributed_lock is None:
+            return
+        try:
+            self._distributed_lock.release()
+        except LockError:
+            logger.warning("The Redis ingestion lock expired before release")
+        self._distributed_lock = None
 
     def _write_redis_state(
         self,

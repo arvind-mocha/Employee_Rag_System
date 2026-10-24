@@ -6,6 +6,7 @@ from app.core.vector_store import (
     ID_COLUMN,
     PGVectorSettings,
     _to_pg_engine_url,
+    drop_vector_store_table,
 )
 from app.ingestion.vector_store import (
     create_vector_store,
@@ -30,6 +31,24 @@ class PGVectorSettingsTests(unittest.TestCase):
 
 
 class VectorStoreCreationTests(unittest.TestCase):
+    @patch("app.core.vector_store.create_pg_engine")
+    def test_drops_only_the_configured_vector_table(
+        self,
+        engine_factory: Mock,
+    ) -> None:
+        settings = PGVectorSettings(
+            database_url="postgresql://localhost/database",
+            table_name="employee_documents",
+            schema_name="private_rag",
+        )
+
+        drop_vector_store_table(settings)
+
+        engine_factory.return_value.drop_table.assert_called_once_with(
+            table_name="employee_documents",
+            schema_name="private_rag",
+        )
+
     @patch("app.ingestion.vector_store.open_vector_store")
     @patch("app.ingestion.vector_store.create_pg_engine")
     def test_uses_existing_vector_table(

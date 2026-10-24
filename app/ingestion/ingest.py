@@ -3,6 +3,7 @@ import logging
 from app.api import config
 from app.ingestion.cleaner import clean_documents
 from app.ingestion.chunker import DocumentChunk, chunk_all_data
+from app.ingestion.evaluation_snapshot import write_evaluation_corpus_snapshot
 from app.core.embeddings import EmbeddingSettings, create_embedding_model
 from app.ingestion.vector_store import create_vector_store, index_chunks
 
@@ -67,6 +68,9 @@ def main() -> None:
             "Process 3 complete: %d chunks indexed",
             len(indexed_ids),
         )
+
+        snapshot = write_evaluation_corpus_snapshot(chunks)
+        logging.info("Evaluation corpus snapshot stored at %s", snapshot)
     except Exception:
         logging.exception("Ingestion pipeline failed")
         raise

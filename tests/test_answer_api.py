@@ -4,10 +4,10 @@ from unittest.mock import Mock, patch
 from fastapi.testclient import TestClient
 
 from app.api.llm import (
-    GeneratedAnswer,
     LLMConfigurationError,
     LLMProvider,
     LLMProviderRequestError,
+    ToolDrivenAnswer,
 )
 from app.api.llm_usage import LLMUsage
 from app.api.main import app
@@ -31,7 +31,7 @@ class AnswerApiTests(unittest.TestCase):
     def setUp(self) -> None:
         self.client = TestClient(app)
 
-    @patch("app.api.controllers.answer.generate_grounded_answer")
+    @patch("app.api.controllers.answer.generate_tool_driven_answer")
     @patch("app.api.controllers.answer.get_query_router")
     def test_defaults_to_huggingface_and_returns_sources(
         self,
@@ -41,19 +41,25 @@ class AnswerApiTests(unittest.TestCase):
         router = Mock()
         router.search.return_value = [retrieved_chunk()]
         get_query_router.return_value = router
-        generate_answer.return_value = GeneratedAnswer(
-            "Employees receive 15 vacation days [1].",
-            LLMProvider.HUGGINGFACE,
-            "google/gemma-2-2b-it",
-            LLMUsage(
-                input_tokens=100,
-                output_tokens=10,
-                total_tokens=110,
-                token_count_source="provider",
-                estimated_cost_usd=None,
-                pricing_source="unavailable",
-            ),
-        )
+        def generate(question, provider, search):
+            chunks = search(question)
+            return ToolDrivenAnswer(
+                "Employees receive 15 vacation days [1].",
+                provider,
+                "google/gemma-2-2b-it",
+                LLMUsage(
+                    input_tokens=100,
+                    output_tokens=10,
+                    total_tokens=110,
+                    token_count_source="provider",
+                    estimated_cost_usd=None,
+                    pricing_source="unavailable",
+                ),
+                tuple(chunks),
+                question,
+            )
+
+        generate_answer.side_effect = generate
 
         response = self.client.post(
             "/api/v1/answers/generate",
@@ -68,6 +74,7 @@ class AnswerApiTests(unittest.TestCase):
         self.assertEqual(body["provider"], "huggingface")
         self.assertEqual(body["model"], "google/gemma-2-2b-it")
         self.assertEqual(body["effective_query"], "vacation days employees receive")
+        self.assertTrue(body["retrieval_used"])
         self.assertEqual(body["sources"][0]["chunk_id"], "chunk-1")
         self.assertEqual(body["usage"]["total_tokens"], 110)
         self.assertIsNone(body["usage"]["estimated_cost_usd"])
@@ -76,35 +83,43 @@ class AnswerApiTests(unittest.TestCase):
             "How many vacation days do employees receive?",
             options,
         )
-        generate_answer.assert_called_once_with(
-            "How many vacation days do employees receive?",
-            router.search.return_value,
-            LLMProvider.HUGGINGFACE,
+        generate_answer.assert_called_once()
+        self.assertEqual(
+            generate_answer.call_args.args[:2],
+            (
+                "How many vacation days do employees receive?",
+                LLMProvider.HUGGINGFACE,
+            ),
         )
+        self.assertTrue(callable(generate_answer.call_args.args[2]))
 
-    @patch("app.api.controllers.answer.generate_grounded_answer")
+    @patch("app.api.controllers.answer.generate_tool_driven_answer")
     @patch("app.api.controllers.answer.get_query_router")
-    def test_selects_openai_when_enabled(
+    def test_skips_retrieval_for_a_direct_openai_answer(
         self,
         get_query_router,
         generate_answer,
     ) -> None:
-        get_query_router.return_value.search.return_value = [retrieved_chunk()]
-        generate_answer.return_value = GeneratedAnswer(
-            "Answer [1].",
+        generate_answer.return_value = ToolDrivenAnswer(
+            "Hello! How can I help?",
             LLMProvider.OPENAI,
             "configured-openai-model",
         )
 
         response = self.client.post(
             "/api/v1/answers/generate",
-            json={"question": "Vacation policy?", "openai": True},
+            json={"question": "Hello", "openai": True},
         )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["provider"], "openai")
+        body = response.json()
+        self.assertEqual(body["provider"], "openai")
+        self.assertFalse(body["retrieval_used"])
+        self.assertEqual(body["sources"], [])
+        self.assertEqual(body["applied_strategies"], [])
+        get_query_router.assert_not_called()
         self.assertEqual(
-            generate_answer.call_args.args[2],
+            generate_answer.call_args.args[1],
             LLMProvider.OPENAI,
         )
 
@@ -120,24 +135,37 @@ class AnswerApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 422)
 
-    @patch("app.api.controllers.answer.generate_grounded_answer")
+    @patch("app.api.controllers.answer.generate_tool_driven_answer")
     @patch("app.api.controllers.answer.get_query_router")
-    def test_returns_not_found_without_context(
+    def test_returns_a_clear_answer_when_the_tool_finds_no_context(
         self,
         get_query_router,
         generate_answer,
     ) -> None:
         get_query_router.return_value.search.return_value = []
 
+        def generate(question, provider, search):
+            chunks = search(question)
+            return ToolDrivenAnswer(
+                "I could not find relevant employee information.",
+                provider,
+                "test-model",
+                chunks=tuple(chunks),
+                retrieval_query=question,
+            )
+
+        generate_answer.side_effect = generate
+
         response = self.client.post(
             "/api/v1/answers/generate",
             json={"question": "Unknown policy?"},
         )
 
-        self.assertEqual(response.status_code, 404)
-        generate_answer.assert_not_called()
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["retrieval_used"])
+        self.assertEqual(response.json()["sources"], [])
 
-    @patch("app.api.controllers.answer.generate_grounded_answer")
+    @patch("app.api.controllers.answer.generate_tool_driven_answer")
     @patch("app.api.controllers.answer.get_query_router")
     def test_reports_missing_provider_configuration(
         self,
@@ -157,7 +185,7 @@ class AnswerApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 503)
         self.assertIn("Settings page", response.json()["detail"])
 
-    @patch("app.api.controllers.answer.generate_grounded_answer")
+    @patch("app.api.controllers.answer.generate_tool_driven_answer")
     @patch("app.api.controllers.answer.get_query_router")
     def test_reports_actionable_provider_failures(
         self,

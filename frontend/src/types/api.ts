@@ -25,6 +25,18 @@ export interface DataUploadResponse {
   total_files: number
   structured_files: string[]
   unstructured_files: string[]
+  ignored_files: string[]
+  renamed_files: Record<string, string>
+}
+
+export interface VectorDatabaseEraseResponse {
+  message: string
+  status: 'erased'
+}
+
+export interface DeleteEvaluationDatasetResponse {
+  dataset_name: string
+  message: string
 }
 
 export type IngestionState =
@@ -106,6 +118,7 @@ export interface AnswerResponse extends RetrievalOptions {
   question: string
   effective_query: string
   applied_strategies: string[]
+  retrieval_used: boolean
   provider: string
   model: string
   answer: string
@@ -158,9 +171,21 @@ export interface RetrievalScores {
   source_recall_at_k: number | null
 }
 
+export type EvaluationCategory =
+  | 'direct_fact'
+  | 'temporal'
+  | 'spanning'
+  | 'relationship'
+  | 'numerical'
+  | 'comparative'
+  | 'holistic'
+  | 'procedural'
+  | 'unanswerable'
+
 export interface EvaluationResult {
   record_id: string
   question: string
+  category: EvaluationCategory
   reference_answer: string
   required_facts: string[]
   review_status: string
@@ -212,14 +237,6 @@ export interface EvaluationRun {
   usage: LlmUsageSummary
   summaries: ProviderSummary[]
   results: EvaluationResult[]
-}
-
-export interface UploadEvaluationDatasetResponse {
-  dataset_name: string
-  dataset_file: string
-  dataset_sha256: string
-  record_count: number
-  review_required: boolean
 }
 
 export interface EvaluationJobAccepted {

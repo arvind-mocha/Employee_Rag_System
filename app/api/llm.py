@@ -2,9 +2,10 @@
 
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 from langchain_core.messages import BaseMessage
+from langchain_core.tools import tool
 from langchain_anthropic import ChatAnthropic
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint
@@ -12,7 +13,11 @@ from langchain_openai import ChatOpenAI
 
 from app.api import config
 from app.api.llm_usage import LLMUsage, calculate_llm_usage
-from app.api.prompts import build_answer_messages
+from app.api.prompts import (
+    build_answer_messages,
+    build_tool_selection_messages,
+    format_retrieval_context,
+)
 from app.core.credential_store import (
     CredentialStoreConfigurationError,
     CredentialStoreUnavailable,
@@ -113,6 +118,22 @@ class GeneratedText:
     usage: LLMUsage | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class ToolDrivenAnswer:
+    """A chat answer plus any evidence retrieved through the model's tool."""
+
+    answer: str
+    provider: LLMProvider
+    model_name: str
+    usage: LLMUsage | None = None
+    chunks: tuple[RetrievedChunk, ...] = ()
+    retrieval_query: str | None = None
+
+    @property
+    def retrieval_used(self) -> bool:
+        return self.retrieval_query is not None
+
+
 def select_provider(
     *,
     hf: bool = False,
@@ -139,8 +160,13 @@ def select_provider(
 def create_chat_model_client(
     provider: LLMProvider,
     settings: LLMSettings | None = None,
+    *,
+    max_output_tokens: int = MAX_ANSWER_TOKENS,
 ) -> ChatModelClient:
     """Create the LangChain chat model configured for one provider."""
+    if max_output_tokens < 1:
+        raise ValueError("max_output_tokens must be at least 1")
+
     settings = settings or _stored_llm_settings(provider)
     settings.validate_provider(provider)
     model_name = settings.model_for(provider)
@@ -150,7 +176,7 @@ def create_chat_model_client(
             repo_id=model_name,
             provider=settings.hf_provider,
             huggingfacehub_api_token=settings.hf_api_key,
-            max_new_tokens=MAX_ANSWER_TOKENS,
+            max_new_tokens=max_output_tokens,
             do_sample=False,
             timeout=MODEL_TIMEOUT_SECONDS,
         )
@@ -162,14 +188,14 @@ def create_chat_model_client(
         model = ChatOpenAI(
             model=model_name,
             api_key=settings.openai_api_key,
-            max_completion_tokens=MAX_ANSWER_TOKENS,
+            max_completion_tokens=max_output_tokens,
             timeout=MODEL_TIMEOUT_SECONDS,
         )
     elif provider is LLMProvider.ANTHROPIC:
         model = ChatAnthropic(
             model_name=model_name,
             api_key=settings.anthropic_api_key,
-            max_tokens_to_sample=MAX_ANSWER_TOKENS,
+            max_tokens_to_sample=max_output_tokens,
             timeout=MODEL_TIMEOUT_SECONDS,
         )
     else:
@@ -177,7 +203,7 @@ def create_chat_model_client(
             model=model_name,
             api_key=settings.grok_api_key,
             base_url=settings.grok_base_url,
-            max_completion_tokens=MAX_ANSWER_TOKENS,
+            max_completion_tokens=max_output_tokens,
             timeout=MODEL_TIMEOUT_SECONDS,
             use_responses_api=False,
         )
@@ -185,9 +211,16 @@ def create_chat_model_client(
     return ChatModelClient(provider, model_name, model)
 
 
-def get_chat_model_client(provider: LLMProvider) -> ChatModelClient:
+def get_chat_model_client(
+    provider: LLMProvider,
+    *,
+    max_output_tokens: int = MAX_ANSWER_TOKENS,
+) -> ChatModelClient:
     """Build a client from the active, unexpired database credential."""
-    return create_chat_model_client(provider)
+    return create_chat_model_client(
+        provider,
+        max_output_tokens=max_output_tokens,
+    )
 
 
 def _stored_llm_settings(provider: LLMProvider) -> LLMSettings:
@@ -271,6 +304,16 @@ def _provider_error_detail(
         return (
             f"{provider.value} rejected the configured generation parameters."
         )
+    if "tool" in message and (
+        "not support" in message
+        or "unsupported" in message
+        or "unexpected" in message
+        or "invalid" in message
+    ):
+        return (
+            f"The configured {provider.value} model does not support tool "
+            "calling. Choose a tool-capable model in Settings."
+        )
     return (
         f"{provider.value} request failed ({type(error).__name__}). "
         "Check the server logs for the upstream error."
@@ -298,21 +341,189 @@ def generate_grounded_answer(
     )
 
 
-def invoke_chat_model(
+def _combined_usage(*usages: LLMUsage | None) -> LLMUsage | None:
+    present = [usage for usage in usages if usage is not None]
+    if not present:
+        return None
+    if len(present) == 1:
+        return present[0]
+
+    costs = [usage.estimated_cost_usd for usage in present]
+    first = present[0]
+    return LLMUsage(
+        input_tokens=sum(usage.input_tokens for usage in present),
+        cached_input_tokens=sum(
+            usage.cached_input_tokens for usage in present
+        ),
+        cache_creation_input_tokens=sum(
+            usage.cache_creation_input_tokens for usage in present
+        ),
+        output_tokens=sum(usage.output_tokens for usage in present),
+        total_tokens=sum(usage.total_tokens for usage in present),
+        token_count_source=(
+            "provider"
+            if all(usage.token_count_source == "provider" for usage in present)
+            else "estimated"
+        ),
+        input_cost_per_million_usd=first.input_cost_per_million_usd,
+        cached_input_cost_per_million_usd=(
+            first.cached_input_cost_per_million_usd
+        ),
+        cache_creation_cost_per_million_usd=(
+            first.cache_creation_cost_per_million_usd
+        ),
+        output_cost_per_million_usd=first.output_cost_per_million_usd,
+        estimated_cost_usd=(
+            round(sum(cost for cost in costs if cost is not None), 10)
+            if all(cost is not None for cost in costs)
+            else None
+        ),
+        pricing_source=(
+            "built_in"
+            if all(usage.pricing_source == "built_in" for usage in present)
+            else "unavailable"
+        ),
+    )
+
+
+def _invoke_client(
+    client: ChatModelClient,
     messages: Sequence[BaseMessage],
-    provider: LLMProvider,
-) -> GeneratedText:
-    """Invoke one configured provider and return normalized text safely."""
+    runnable: Any | None = None,
+) -> tuple[BaseMessage, LLMUsage]:
     try:
-        client = get_chat_model_client(provider)
-        response = client.model.invoke(messages)
-    except LLMConfigurationError:
-        raise
+        selected_runnable = runnable if runnable is not None else client.model
+        response = selected_runnable.invoke(messages)
+    except Exception as error:
+        raise LLMProviderRequestError(
+            client.provider,
+            _provider_error_detail(client.provider, error),
+        ) from error
+    usage = calculate_llm_usage(
+        messages,
+        response,
+        client.provider.value,
+        client.model_name,
+    )
+    return response, usage
+
+
+def generate_tool_driven_answer(
+    question: str,
+    provider: LLMProvider,
+    search: Callable[[str], list[RetrievedChunk]],
+) -> ToolDrivenAnswer:
+    """Let the chat model decide whether to search employee knowledge."""
+    retrieved_chunks: list[RetrievedChunk] = []
+    retrieval_query: str | None = None
+
+    @tool("search_employee_knowledge")
+    def search_employee_knowledge(query: str) -> str:
+        """Search uploaded employee documents and company-specific knowledge."""
+        nonlocal retrieval_query
+        normalized_query = query.strip() or question.strip()
+        retrieval_query = normalized_query
+        retrieved_chunks.extend(search(normalized_query))
+        if not retrieved_chunks:
+            return "No relevant employee documents were found."
+        return format_retrieval_context(retrieved_chunks)
+
+    client = get_chat_model_client(provider)
+    selection_messages = build_tool_selection_messages(question)
+    try:
+        tool_model = client.model.bind_tools(
+            [search_employee_knowledge],
+            tool_choice="auto",
+        )
     except Exception as error:
         raise LLMProviderRequestError(
             provider,
-            _provider_error_detail(provider, error),
+            (
+                f"The configured {provider.value} model does not support "
+                "tool calling. Choose a tool-capable model in Settings."
+            ),
         ) from error
+
+    selection, selection_usage = _invoke_client(
+        client,
+        selection_messages,
+        tool_model,
+    )
+    tool_calls = getattr(selection, "tool_calls", None) or []
+    matching_call = next(
+        (
+            call
+            for call in tool_calls
+            if call.get("name") == search_employee_knowledge.name
+        ),
+        None,
+    )
+
+    if matching_call is None:
+        direct_answer = _message_text(selection.content)
+        if not direct_answer:
+            raise LLMProviderRequestError(
+                provider,
+                f"{provider.value} returned neither an answer nor a tool call.",
+            )
+        return ToolDrivenAnswer(
+            direct_answer,
+            client.provider,
+            client.model_name,
+            selection_usage,
+        )
+
+    arguments = matching_call.get("args")
+    query = arguments.get("query") if isinstance(arguments, dict) else None
+    search_employee_knowledge.invoke(
+        {"query": query if isinstance(query, str) else question}
+    )
+
+    if not retrieved_chunks:
+        return ToolDrivenAnswer(
+            (
+                "I searched the uploaded employee documents but could not find "
+                "relevant information for that question."
+            ),
+            client.provider,
+            client.model_name,
+            selection_usage,
+            retrieval_query=retrieval_query,
+        )
+
+    grounded_messages = build_answer_messages(question, retrieved_chunks)
+    grounded_response, grounded_usage = _invoke_client(
+        client,
+        grounded_messages,
+    )
+    grounded_answer = _message_text(grounded_response.content)
+    if not grounded_answer:
+        raise LLMProviderRequestError(
+            provider,
+            f"{provider.value} returned an empty grounded answer.",
+        )
+    return ToolDrivenAnswer(
+        grounded_answer,
+        client.provider,
+        client.model_name,
+        _combined_usage(selection_usage, grounded_usage),
+        tuple(retrieved_chunks),
+        retrieval_query,
+    )
+
+
+def invoke_chat_model(
+    messages: Sequence[BaseMessage],
+    provider: LLMProvider,
+    *,
+    max_output_tokens: int = MAX_ANSWER_TOKENS,
+) -> GeneratedText:
+    """Invoke one configured provider and return normalized text safely."""
+    client = get_chat_model_client(
+        provider,
+        max_output_tokens=max_output_tokens,
+    )
+    response, usage = _invoke_client(client, messages)
 
     text = _message_text(response.content)
     if not text:
@@ -320,10 +531,4 @@ def invoke_chat_model(
             provider,
             f"{provider.value} returned an empty response.",
         )
-    usage = calculate_llm_usage(
-        messages,
-        response,
-        client.provider.value,
-        client.model_name,
-    )
     return GeneratedText(text, client.provider, client.model_name, usage)

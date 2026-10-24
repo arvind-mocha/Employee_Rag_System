@@ -13,12 +13,11 @@ import {
   Info,
   Layers3,
   Play,
-  Plus,
   RefreshCw,
   ShieldCheck,
   Sparkles,
   Target,
-  UploadCloud,
+  Trash2,
   X,
   XCircle,
 } from 'lucide-react'
@@ -36,8 +35,8 @@ import { StrategyControls } from '../components/StrategyControls'
 import { api } from '../lib/api'
 import {
   averageResultScore,
+  categoryLabel,
   CATEGORIES,
-  classifyQuestion,
   compactNumber,
   DEFAULT_RETRIEVAL,
   milliseconds,
@@ -54,12 +53,6 @@ import type {
   Provider,
   RetrievalOptions,
 } from '../types/api'
-
-const DATASET_EXAMPLE = `How many vacation days do employees receive?
-What health and dental benefits are available?
-What is the remote work policy?
-Who approves employee expense reports?
-What are the company's core values?`
 
 const TERMINAL_JOB_STATES = new Set([
   'completed',
@@ -121,17 +114,17 @@ function storeJob(key: string, job: EvaluationJobAccepted | null) {
 }
 
 function readStoredDatasetName(): string {
-  const value = window.localStorage.getItem(DATASET_NAME_STORAGE_KEY) ?? ''
+  const storedValue = window.localStorage.getItem(DATASET_NAME_STORAGE_KEY)
+  if (storedValue === null) return 'employee-policies'
+  const value = storedValue
   return /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(value)
     ? value
-    : 'employee-policies'
+    : ''
 }
 
 function storeDatasetName(value: string) {
   window.localStorage.setItem(DATASET_NAME_STORAGE_KEY, value)
 }
-
-type DatasetBuilderMode = 'upload' | 'generate'
 
 function useEvaluationJob(job: EvaluationJobAccepted | null) {
   return useQuery({
@@ -244,16 +237,20 @@ function MetricCard({
 function EvaluationDashboard({ run }: { run: EvaluationRun }) {
   const chartData = useMemo(
     () =>
-      CATEGORIES.map((category) => {
+      CATEGORIES.filter((category) =>
+        run.results.some(
+          (result) => (result.category ?? 'direct_fact') === category.id,
+        ),
+      ).map((category) => {
         const row: Record<string, string | number | null> = {
-          category,
-          shortCategory: category.replace(' & ', ' / '),
+          category: category.label,
+          shortCategory: category.shortLabel,
         }
         for (const summary of run.summaries) {
           const matching = run.results.filter(
             (result) =>
               result.answer_provider === summary.provider &&
-              classifyQuestion(result.question) === category &&
+              (result.category ?? 'direct_fact') === category.id &&
               result.answer_scores,
           )
           const average = averageResultScore(
@@ -390,8 +387,8 @@ function EvaluationDashboard({ run }: { run: EvaluationRun }) {
             </ResponsiveContainer>
           </div>
           <div className="chart-note">
-            <Info size={14} /> Questions are mapped to the five employee categories
-            for display; evaluation scores come directly from the API.
+            <Info size={14} /> Categories are assigned while ground truth is
+            generated and returned with each evaluation result.
           </div>
         </section>
       </div>
@@ -467,7 +464,9 @@ function EvaluationDashboard({ run }: { run: EvaluationRun }) {
                     <small>{result.record_id}</small>
                   </td>
                   <td>
-                    <span className="category-pill">{classifyQuestion(result.question)}</span>
+                    <span className="category-pill">
+                      {categoryLabel(result.category)}
+                    </span>
                   </td>
                   <td>{providerName(result.answer_provider)}</td>
                   <td className="score-cell">{score100(result.answer_scores?.overall)}</td>
@@ -515,16 +514,16 @@ export function EvaluationPage() {
       readStoredJob(EVALUATION_JOB_STORAGE_KEY),
     )
   const [showDatasetBuilder, setShowDatasetBuilder] = useState(false)
-  const [datasetBuilderMode, setDatasetBuilderMode] =
-    useState<DatasetBuilderMode>('upload')
-  const [datasetQuestions, setDatasetQuestions] = useState(DATASET_EXAMPLE)
+  const [questionsPerCategory, setQuestionsPerCategory] = useState(1)
   const [referenceProvider, setReferenceProvider] =
     useState<Provider>('huggingface')
   const [overwrite, setOverwrite] = useState(false)
   const [datasetJob, setDatasetJob] = useState<EvaluationJobAccepted | null>(
     () => readStoredJob(DATASET_JOB_STORAGE_KEY),
   )
-  const [datasetFile, setDatasetFile] = useState<File | null>(null)
+  const [datasetDeleteTarget, setDatasetDeleteTarget] = useState<string | null>(
+    null,
+  )
 
   const evaluationMutation = useMutation({
     mutationFn: api.runEvaluation,
@@ -544,11 +543,20 @@ export function EvaluationPage() {
   })
   const datasetStatus = useEvaluationJob(datasetJob)
 
-  const uploadMutation = useMutation({
-    mutationFn: api.uploadDataset,
-    onSuccess: (result) => {
-      storeDatasetName(result.dataset_name)
-      setDatasetName(result.dataset_name)
+  const deleteDatasetMutation = useMutation({
+    mutationFn: api.deleteDataset,
+    onSuccess: (_, deletedName) => {
+      setDatasetDeleteTarget(null)
+      if (datasetName.trim() === deletedName) {
+        setDatasetName('')
+        storeDatasetName('')
+      }
+      storeJob(DATASET_JOB_STORAGE_KEY, null)
+      setDatasetJob(null)
+      datasetMutation.reset()
+      storeJob(EVALUATION_JOB_STORAGE_KEY, null)
+      setEvaluationJob(null)
+      evaluationMutation.reset()
     },
   })
 
@@ -573,46 +581,17 @@ export function EvaluationPage() {
 
   const generateDataset = (event: FormEvent) => {
     event.preventDefault()
-    const questions = datasetQuestions
-      .split('\n')
-      .map((question) => question.trim())
-      .filter(Boolean)
-    if (!datasetName.trim() || !questions.length) return
+    if (!datasetName.trim()) return
     storeDatasetName(datasetName.trim())
     storeJob(DATASET_JOB_STORAGE_KEY, null)
     setDatasetJob(null)
-    uploadMutation.reset()
     datasetMutation.mutate({
       dataset_name: datasetName.trim(),
-      questions,
+      questions_per_category: questionsPerCategory,
       reference_provider: referenceProvider,
       overwrite,
       ...retrieval,
     })
-  }
-
-  const uploadDataset = (event: FormEvent) => {
-    event.preventDefault()
-    if (!datasetName.trim() || !datasetFile) return
-    storeDatasetName(datasetName.trim())
-    storeJob(DATASET_JOB_STORAGE_KEY, null)
-    setDatasetJob(null)
-    datasetMutation.reset()
-    uploadMutation.mutate({
-      dataset_name: datasetName.trim(),
-      dataset_file: datasetFile,
-      overwrite,
-    })
-  }
-
-  const selectDatasetFile = (file: File | null) => {
-    setDatasetFile(file)
-    uploadMutation.reset()
-    if (!file) return
-    const filename = file.name.replace(/\.jsonl$/i, '')
-    if (/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(filename)) {
-      setDatasetName(filename)
-    }
   }
 
   const activeEvaluation = evaluationMutation.isPending || Boolean(
@@ -620,7 +599,7 @@ export function EvaluationPage() {
   )
   const activeDataset = datasetMutation.isPending || Boolean(
     datasetStatus.data && !TERMINAL_JOB_STATES.has(datasetStatus.data.status),
-  ) || uploadMutation.isPending
+  )
 
   return (
     <div className="page evaluation-page">
@@ -658,8 +637,8 @@ export function EvaluationPage() {
                 className="text-button"
                 onClick={() => setShowDatasetBuilder((value) => !value)}
               >
-                {showDatasetBuilder ? <X size={15} /> : <Plus size={15} />}
-                {showDatasetBuilder ? 'Close builder' : 'Add dataset'}
+                {showDatasetBuilder ? <X size={15} /> : <Sparkles size={15} />}
+                {showDatasetBuilder ? 'Close generator' : 'Generate dataset'}
               </button>
             </div>
             <label className="field-label" htmlFor="dataset-name">
@@ -670,17 +649,95 @@ export function EvaluationPage() {
               <input
                 id="dataset-name"
                 value={datasetName}
-                onChange={(event) => setDatasetName(event.target.value)}
+                onChange={(event) => {
+                  setDatasetName(event.target.value)
+                  setDatasetDeleteTarget(null)
+                  deleteDatasetMutation.reset()
+                }}
                 placeholder="employee-policies"
                 pattern="[A-Za-z0-9][A-Za-z0-9_-]*"
                 maxLength={64}
                 required
               />
-              <span className="file-extension">.jsonl</span>
+              <button
+                className="dataset-delete-button"
+                type="button"
+                aria-label="Delete selected evaluation dataset"
+                title="Delete selected dataset"
+                onClick={() => {
+                  deleteDatasetMutation.reset()
+                  setDatasetDeleteTarget(datasetName.trim())
+                }}
+                disabled={
+                  !datasetName.trim() ||
+                  activeDataset ||
+                  activeEvaluation ||
+                  deleteDatasetMutation.isPending
+                }
+              >
+                <Trash2 size={15} />
+              </button>
             </div>
             <small className="field-help">
-              Enter the stored filename without the .jsonl extension.
+              Enter the name of a generated dataset, or generate a new one.
             </small>
+            {datasetDeleteTarget && (
+              <div className="dataset-delete-confirmation" role="alert">
+                <AlertTriangle size={17} />
+                <span>
+                  <strong>Delete {datasetDeleteTarget}.jsonl?</strong>
+                  <small>
+                    This permanently removes the generated ground-truth dataset.
+                    Ingested source documents are not affected.
+                  </small>
+                </span>
+                <div>
+                  <button
+                    className="secondary-button"
+                    type="button"
+                    onClick={() => setDatasetDeleteTarget(null)}
+                    disabled={deleteDatasetMutation.isPending}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    className="dataset-delete-confirm-button"
+                    type="button"
+                    onClick={() =>
+                      deleteDatasetMutation.mutate(datasetDeleteTarget)
+                    }
+                    disabled={deleteDatasetMutation.isPending}
+                  >
+                    {deleteDatasetMutation.isPending ? (
+                      <i className="spinner" />
+                    ) : (
+                      <Trash2 size={15} />
+                    )}
+                    {deleteDatasetMutation.isPending
+                      ? 'Deleting dataset'
+                      : 'Delete dataset'}
+                  </button>
+                </div>
+              </div>
+            )}
+            {deleteDatasetMutation.isError && (
+              <div className="dataset-delete-notice error" role="alert">
+                <XCircle size={16} />
+                <span>
+                  <strong>Dataset could not be deleted.</strong>
+                  <small>{deleteDatasetMutation.error.message}</small>
+                </span>
+              </div>
+            )}
+            {deleteDatasetMutation.isSuccess && (
+              <div className="dataset-delete-notice success" role="status">
+                <CheckCircle2 size={16} />
+                <span>
+                  <strong>Dataset deleted.</strong>
+                  <small>{deleteDatasetMutation.data.message}</small>
+                </span>
+              </div>
+            )}
             <div className="dataset-quality-warning" role="note">
               <AlertTriangle size={15} />
               <span>
@@ -759,7 +816,12 @@ export function EvaluationPage() {
           <button
             className="primary-button"
             type="submit"
-            disabled={activeEvaluation || !datasetName.trim()}
+            disabled={
+              activeEvaluation ||
+              !datasetName.trim() ||
+              Boolean(datasetDeleteTarget) ||
+              deleteDatasetMutation.isPending
+            }
           >
             {activeEvaluation ? <i className="spinner" /> : <Play size={17} />}
             {activeEvaluation ? 'Evaluation running' : 'Run evaluation'}
@@ -771,196 +833,110 @@ export function EvaluationPage() {
         <section className="dataset-builder">
           <div className="dataset-builder-heading">
             <div className="builder-icon">
-              {datasetBuilderMode === 'upload' ? (
-                <UploadCloud size={20} />
-              ) : (
-                <FilePlus2 size={20} />
-              )}
+              <FilePlus2 size={20} />
             </div>
             <div>
               <span>Evaluation dataset</span>
-              <h2>Upload JSONL or generate ground truth</h2>
+              <h2>Generate ground truth</h2>
               <p>
-                Provide a compatible JSONL dataset of your own, or generate one
-                from the currently indexed documents.
+                The app reads the ingested corpus and creates a balanced,
+                categorized evaluation dataset on demand.
               </p>
             </div>
           </div>
-          <div className="dataset-mode-tabs" role="tablist" aria-label="Dataset source">
-            <button
-              type="button"
-              role="tab"
-              aria-selected={datasetBuilderMode === 'upload'}
-              className={datasetBuilderMode === 'upload' ? 'active' : ''}
-              onClick={() => setDatasetBuilderMode('upload')}
-            >
-              <UploadCloud size={15} /> Upload JSONL
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={datasetBuilderMode === 'generate'}
-              className={datasetBuilderMode === 'generate' ? 'active' : ''}
-              onClick={() => setDatasetBuilderMode('generate')}
-            >
-              <Sparkles size={15} /> Generate dataset
-            </button>
-          </div>
-
-          {datasetBuilderMode === 'upload' ? (
-            <form className="builder-grid" onSubmit={uploadDataset}>
-              <div className="questions-field">
-                <span>JSONL dataset</span>
-                <label className={datasetFile ? 'upload-dropzone selected' : 'upload-dropzone'}>
-                  <UploadCloud size={25} />
-                  <strong>{datasetFile?.name ?? 'Choose a .jsonl file'}</strong>
-                  <small>
-                    {datasetFile
-                      ? `${Math.max(1, Math.ceil(datasetFile.size / 1024))} KB selected`
-                      : 'Up to 10 MB and 100 evaluation records'}
-                  </small>
+          <form className="builder-grid" onSubmit={generateDataset}>
+            <div className="questions-field">
+              <span>Balanced category coverage</span>
+              <div className="generated-category-grid">
+                {CATEGORIES.map((category) => (
+                  <span key={category.id}>{category.label}</span>
+                ))}
+              </div>
+              <label className="question-count-field">
+                <span>Questions per category</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={5}
+                  value={questionsPerCategory}
+                  onChange={(event) => {
+                    const value = event.target.valueAsNumber
+                    if (Number.isInteger(value) && value >= 1 && value <= 5) {
+                      setQuestionsPerCategory(value)
+                    }
+                  }}
+                />
+              </label>
+              <small>
+                {questionsPerCategory * CATEGORIES.length} questions will be
+                generated from stored ingestion chunks. No generation runs until
+                you select Generate ground truth.
+              </small>
+            </div>
+            <div className="builder-options">
+              <label>
+                <span>Dataset name</span>
+                <div className="builder-filename">
                   <input
-                    type="file"
-                    accept=".jsonl,application/x-ndjson"
-                    onChange={(event) => selectDatasetFile(event.target.files?.[0] ?? null)}
+                    value={datasetName}
+                    onChange={(event) => {
+                      setDatasetName(event.target.value)
+                      setDatasetDeleteTarget(null)
+                      deleteDatasetMutation.reset()
+                    }}
+                    pattern="[A-Za-z0-9][A-Za-z0-9_-]*"
+                    maxLength={64}
                     required
                   />
-                </label>
-                <small>
-                  Records must match the generated ground-truth JSONL schema,
-                  including reference answers, facts, and evidence hashes.
-                </small>
-              </div>
-              <div className="builder-options">
-                <label>
-                  <span>Save as</span>
-                  <div className="builder-filename">
-                    <input
-                      value={datasetName}
-                      onChange={(event) => setDatasetName(event.target.value)}
-                      pattern="[A-Za-z0-9][A-Za-z0-9_-]*"
-                      maxLength={64}
-                      required
-                    />
-                    <span>.jsonl</span>
-                  </div>
-                </label>
-                <button
-                  className={overwrite ? 'checkbox-row checked' : 'checkbox-row'}
-                  type="button"
-                  onClick={() => setOverwrite((value) => !value)}
-                >
-                  <i>{overwrite && <Check size={13} />}</i>
-                  <span>
-                    <strong>Overwrite existing dataset</strong>
-                    <small>Replace a JSONL file with the same name</small>
-                  </span>
-                </button>
-                <div className="warning-note">
-                  <AlertTriangle size={16} />
-                  <span>
-                    Uploaded data is validated for structure, not factual quality.
-                    Review it carefully before relying on evaluation scores.
-                  </span>
                 </div>
-                <button
-                  className="secondary-button"
-                  type="submit"
-                  disabled={activeDataset || !datasetName.trim() || !datasetFile}
-                >
-                  {uploadMutation.isPending ? (
-                    <i className="spinner dark" />
-                  ) : (
-                    <UploadCloud size={16} />
-                  )}
-                  {uploadMutation.isPending ? 'Uploading dataset' : 'Upload dataset'}
-                </button>
-              </div>
-            </form>
-          ) : (
-            <form className="builder-grid" onSubmit={generateDataset}>
-              <label className="questions-field">
-                <span>Questions</span>
-                <textarea
-                  value={datasetQuestions}
-                  onChange={(event) => setDatasetQuestions(event.target.value)}
-                  rows={7}
-                  required
-                />
-                <small>
-                  {datasetQuestions.split('\n').filter((line) => line.trim()).length} questions
-                </small>
               </label>
-              <div className="builder-options">
-                <label>
-                  <span>Save as</span>
-                  <div className="builder-filename">
-                    <input
-                      value={datasetName}
-                      onChange={(event) => setDatasetName(event.target.value)}
-                      pattern="[A-Za-z0-9][A-Za-z0-9_-]*"
-                      maxLength={64}
-                      required
-                    />
-                    <span>.jsonl</span>
-                  </div>
-                </label>
-                <label>
-                  <span>Reference model</span>
-                  <select
-                    value={referenceProvider}
-                    onChange={(event) => setReferenceProvider(event.target.value as Provider)}
-                  >
-                    {PROVIDERS.map((provider) => (
-                      <option value={provider.id} key={provider.id}>
-                        {provider.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <button
-                  className={overwrite ? 'checkbox-row checked' : 'checkbox-row'}
-                  type="button"
-                  onClick={() => setOverwrite((value) => !value)}
+              <label>
+                <span>Reference model</span>
+                <select
+                  value={referenceProvider}
+                  onChange={(event) => setReferenceProvider(event.target.value as Provider)}
                 >
-                  <i>{overwrite && <Check size={13} />}</i>
-                  <span>
-                    <strong>Overwrite existing dataset</strong>
-                    <small>Replace a JSONL file with the same name</small>
-                  </span>
-                </button>
-                <div className="warning-note">
-                  <AlertTriangle size={16} />
-                  <span>
-                    Generated references require human review. Incorrect or
-                    unrepresentative ground truth makes results unreliable.
-                  </span>
-                </div>
-                <button
-                  className="secondary-button"
-                  type="submit"
-                  disabled={activeDataset || !datasetName.trim()}
-                >
-                  {activeDataset ? <i className="spinner dark" /> : <FilePlus2 size={16} />}
-                  {activeDataset ? 'Generating dataset' : 'Generate ground truth'}
-                </button>
+                  {PROVIDERS.map((provider) => (
+                    <option value={provider.id} key={provider.id}>
+                      {provider.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <button
+                className={overwrite ? 'checkbox-row checked' : 'checkbox-row'}
+                type="button"
+                onClick={() => setOverwrite((value) => !value)}
+              >
+                <i>{overwrite && <Check size={13} />}</i>
+                <span>
+                  <strong>Overwrite existing dataset</strong>
+                  <small>Replace a generated dataset with the same name</small>
+                </span>
+              </button>
+              <div className="warning-note">
+                <AlertTriangle size={16} />
+                <span>
+                  Generated references and categories require human review.
+                  Incorrect ground truth makes evaluation results unreliable.
+                </span>
               </div>
-            </form>
-          )}
+              <button
+                className="secondary-button"
+                type="submit"
+                disabled={
+                  activeDataset ||
+                  !datasetName.trim() ||
+                  Boolean(datasetDeleteTarget) ||
+                  deleteDatasetMutation.isPending
+                }
+              >
+                {activeDataset ? <i className="spinner dark" /> : <FilePlus2 size={16} />}
+                {activeDataset ? 'Generating dataset' : 'Generate ground truth'}
+              </button>
+            </div>
+          </form>
         </section>
-      )}
-
-      {uploadMutation.isError && (
-        <div className="error-banner" role="alert">
-          <strong>Dataset upload failed.</strong>
-          <span>{uploadMutation.error.message}</span>
-        </div>
-      )}
-      {uploadMutation.data && (
-        <JobProgress
-          label={`${uploadMutation.data.record_count}-record dataset uploaded`}
-          status="completed"
-        />
       )}
 
       {datasetMutation.isError && (
@@ -1005,12 +981,12 @@ export function EvaluationPage() {
             </div>
             <h2>Your results will appear here</h2>
             <p>
-              Run an evaluation to compare model quality across five employee
-              question categories, inspect every score, and review cost and latency.
+              Run an evaluation to compare model quality across retrieval and
+              reasoning categories, inspect every score, and review cost and latency.
             </p>
             <div>
               {CATEGORIES.map((category) => (
-                <span key={category}>{category}</span>
+                <span key={category.id}>{category.label}</span>
               ))}
             </div>
           </div>

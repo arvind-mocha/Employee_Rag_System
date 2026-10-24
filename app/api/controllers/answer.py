@@ -1,4 +1,4 @@
-"""HTTP handler for retrieval-grounded LLM answers."""
+"""HTTP handler for tool-directed LLM answers."""
 
 import logging
 
@@ -7,7 +7,7 @@ from fastapi import HTTPException, status
 from app.api.llm import (
     LLMConfigurationError,
     LLMProviderRequestError,
-    generate_grounded_answer,
+    generate_tool_driven_answer,
     select_provider,
 )
 from app.api.schemas.answer import AnswerRequest, AnswerResponse
@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 def answer_question(request: AnswerRequest) -> AnswerResponse:
-    """Retrieve context and generate one provider-selected answer."""
+    """Let one provider-selected model decide whether retrieval is needed."""
     provider = select_provider(
         hf=request.hf,
         openai=request.openai,
@@ -34,26 +34,27 @@ def answer_question(request: AnswerRequest) -> AnswerResponse:
         source_diversity=request.source_diversity,
     )
 
-    try:
-        chunks = get_query_router().search(request.question, options)
-    except Exception as error:
-        logger.exception("Answer context retrieval failed")
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=(
-                "Retrieval is unavailable. Verify the embedding configuration "
-                "and PostgreSQL connection."
-            ),
-        ) from error
+    def search_employee_knowledge(query: str):
+        try:
+            return get_query_router().search(query, options)
+        except Exception as error:
+            logger.exception("Answer context retrieval failed")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=(
+                    "Retrieval is unavailable. Verify the embedding "
+                    "configuration and PostgreSQL connection."
+                ),
+            ) from error
 
-    if not chunks:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="No relevant context was found for the question.",
+    try:
+        generated = generate_tool_driven_answer(
+            request.question,
+            provider,
+            search_employee_knowledge,
         )
-
-    try:
-        generated = generate_grounded_answer(request.question, chunks, provider)
+    except HTTPException:
+        raise
     except LLMConfigurationError as error:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -82,8 +83,13 @@ def answer_question(request: AnswerRequest) -> AnswerResponse:
             section=chunk.section,
             chunk_index=chunk.chunk_index,
         )
-        for chunk in chunks
+        for chunk in generated.chunks
     ]
+    effective_query = (
+        options.effective_query(generated.retrieval_query)
+        if generated.retrieval_query is not None
+        else request.question
+    )
     return AnswerResponse(
         question=request.question,
         semantic_search=request.semantic_search,
@@ -91,8 +97,11 @@ def answer_question(request: AnswerRequest) -> AnswerResponse:
         query_rewriting=request.query_rewriting,
         reranking=request.reranking,
         source_diversity=request.source_diversity,
-        effective_query=options.effective_query(request.question),
-        applied_strategies=options.applied_strategies(),
+        effective_query=effective_query,
+        applied_strategies=(
+            options.applied_strategies() if generated.retrieval_used else []
+        ),
+        retrieval_used=generated.retrieval_used,
         provider=generated.provider.value,
         model=generated.model_name,
         answer=generated.answer,

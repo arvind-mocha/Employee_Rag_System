@@ -10,6 +10,7 @@ from app.evaluation.dataset import (
     dataset_sha256,
     evidence_fingerprint,
     ground_truth_status,
+    indexed_corpus_fingerprint,
     parse_dataset_jsonl,
     read_dataset,
     snapshot_evidence,
@@ -59,6 +60,40 @@ def ground_truth_record(evidence=None) -> GroundTruthRecord:
 
 
 class EvaluationDatasetTests(unittest.TestCase):
+    def test_corpus_fingerprint_ignores_the_derived_evaluation_snapshot(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            markdown_root = root / "markdown"
+            structured_root = root / "structured"
+            markdown_root.mkdir()
+            structured_root.mkdir()
+            source = markdown_root / "handbook.md"
+            snapshot = markdown_root / ".evaluation_corpus.json"
+            source.write_text("15 vacation days", encoding="utf-8")
+
+            with (
+                patch(
+                    "app.evaluation.dataset.config.TEMP_DATA_DIRECTORY",
+                    markdown_root,
+                ),
+                patch(
+                    "app.evaluation.dataset.config.STRUCTURED_DATA_DIRECTORY",
+                    structured_root,
+                ),
+                patch(
+                    "app.evaluation.dataset.config.EVALUATION_CORPUS_SNAPSHOT_FILE",
+                    snapshot,
+                ),
+            ):
+                original = indexed_corpus_fingerprint()
+                snapshot.write_text("derived snapshot", encoding="utf-8")
+                self.assertEqual(indexed_corpus_fingerprint(), original)
+
+                source.write_text("20 vacation days", encoding="utf-8")
+                self.assertNotEqual(indexed_corpus_fingerprint(), original)
+
     def test_rejects_unsafe_dataset_names(self) -> None:
         with self.assertRaisesRegex(ValueError, "dataset_name"):
             validate_dataset_name("../secrets")

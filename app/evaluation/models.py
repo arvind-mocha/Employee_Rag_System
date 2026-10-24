@@ -21,6 +21,20 @@ class GroundTruthStatus(StrEnum):
     UNVERIFIABLE = "unverifiable"
 
 
+class EvaluationCategory(StrEnum):
+    """Primary reasoning or retrieval pattern exercised by a test case."""
+
+    DIRECT_FACT = "direct_fact"
+    TEMPORAL = "temporal"
+    SPANNING = "spanning"
+    RELATIONSHIP = "relationship"
+    NUMERICAL = "numerical"
+    COMPARATIVE = "comparative"
+    HOLISTIC = "holistic"
+    PROCEDURAL = "procedural"
+    UNANSWERABLE = "unanswerable"
+
+
 class RetrievalConfiguration(BaseModel):
     semantic_search: bool = True
     keyword_search: bool = True
@@ -48,11 +62,13 @@ class EvidenceSnapshot(BaseModel):
 
 
 class GroundTruthRecord(BaseModel):
-    schema_version: Literal[1] = 1
+    schema_version: Literal[1, 2] = 2
     id: str
     question: str
     answerable: bool
     reference_answer: str
+    category: EvaluationCategory = EvaluationCategory.DIRECT_FACT
+    keywords: list[str] = Field(default_factory=list, max_length=8)
     required_facts: list[str]
     retrieved_evidence: list[EvidenceSnapshot] = Field(default_factory=list)
     relevant_evidence: list[EvidenceSnapshot]
@@ -65,12 +81,42 @@ class GroundTruthRecord(BaseModel):
     retrieval: RetrievalConfiguration
     review_status: ReviewStatus = ReviewStatus.MACHINE_GENERATED
 
+    @model_validator(mode="after")
+    def align_unanswerable_category(self) -> "GroundTruthRecord":
+        if not self.answerable:
+            self.category = EvaluationCategory.UNANSWERABLE
+            self.keywords = []
+        elif self.category is EvaluationCategory.UNANSWERABLE:
+            raise ValueError(
+                "an answerable record cannot use the unanswerable category"
+            )
+        return self
+
 
 class ReferenceDraft(BaseModel):
     answerable: bool
     reference_answer: str
+    category: EvaluationCategory
+    keywords: list[str] = Field(default_factory=list, max_length=8)
     required_facts: list[str] = Field(default_factory=list)
     relevant_evidence_numbers: list[int] = Field(default_factory=list)
+
+
+class GeneratedEvaluationQuestion(BaseModel):
+    """One corpus-derived question requested for a specific test category."""
+
+    question: str = Field(min_length=1, max_length=2_000)
+    category: EvaluationCategory
+    relevant_evidence_numbers: list[int] = Field(
+        default_factory=list,
+        max_length=8,
+    )
+
+
+class QuestionGenerationDraft(BaseModel):
+    """Structured question-generation response returned by the reference model."""
+
+    questions: list[GeneratedEvaluationQuestion]
 
 
 class JudgeDraft(BaseModel):
@@ -120,6 +166,7 @@ class EvaluationTiming(BaseModel):
 class EvaluationCaseResult(BaseModel):
     record_id: str
     question: str
+    category: EvaluationCategory
     reference_answer: str
     required_facts: list[str]
     review_status: ReviewStatus

@@ -70,8 +70,15 @@ def indexed_corpus_fingerprint() -> str:
     for label, root in roots:
         if not root.is_dir():
             continue
+        snapshot_file = config.EVALUATION_CORPUS_SNAPSHOT_FILE.resolve()
+        snapshot_temporary = snapshot_file.with_suffix(
+            f"{snapshot_file.suffix}.tmp"
+        )
         files = sorted(
-            candidate for candidate in root.rglob("*") if candidate.is_file()
+            candidate
+            for candidate in root.rglob("*")
+            if candidate.is_file()
+            and candidate.resolve() not in {snapshot_file, snapshot_temporary}
         )
         for path in files:
             entries.append(

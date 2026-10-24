@@ -67,6 +67,16 @@ class IngestionApiTests(unittest.TestCase):
 
 
 class IngestionRunnerTests(unittest.TestCase):
+    def test_finishes_a_reserved_maintenance_operation(self) -> None:
+        runner = IngestionRunner()
+
+        self.assertTrue(runner.reserve())
+        self.assertEqual(runner.get_status().status, "pending")
+        runner.finish_maintenance()
+
+        self.assertEqual(runner.get_status().status, "idle")
+        self.assertTrue(runner.reserve())
+
     @patch("app.api.services.ingestion_runner.run_ingestion_pipeline")
     def test_records_completed_status(self, pipeline) -> None:
         runner = IngestionRunner()

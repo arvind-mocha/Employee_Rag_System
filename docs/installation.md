@@ -110,9 +110,10 @@ Only masked metadata is returned to the browser after saving.
 3. Select a ZIP containing supported files.
 4. Select **Upload ZIP**.
 
-The server validates the archive before storing it. Unsupported file types,
-unsafe paths, duplicate flattened filenames, and conflicts with existing files
-are rejected.
+The server validates the archive before storing it. Unsafe paths and archives
+without any supported files are rejected. Unsupported members in a mixed
+archive are ignored, while duplicate or existing filenames receive a numeric
+suffix.
 
 ### 3. Build the knowledge index
 

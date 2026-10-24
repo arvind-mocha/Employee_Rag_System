@@ -13,6 +13,7 @@ from app.api.llm import (
     LLMSettings,
     create_chat_model_client,
     generate_grounded_answer,
+    generate_tool_driven_answer,
     get_chat_model_client,
     select_provider,
 )
@@ -113,7 +114,11 @@ class ChatModelFactoryTests(unittest.TestCase):
             openai_model="configured-openai-model",
         )
 
-        client = create_chat_model_client(LLMProvider.OPENAI, settings)
+        client = create_chat_model_client(
+            LLMProvider.OPENAI,
+            settings,
+            max_output_tokens=2_048,
+        )
 
         self.assertIs(client.model, chat_class.return_value)
         self.assertEqual(
@@ -123,6 +128,10 @@ class ChatModelFactoryTests(unittest.TestCase):
         self.assertEqual(
             chat_class.call_args.kwargs["api_key"],
             "openai-secret",
+        )
+        self.assertEqual(
+            chat_class.call_args.kwargs["max_completion_tokens"],
+            2_048,
         )
 
     @patch("app.api.llm.ChatAnthropic")
@@ -164,6 +173,101 @@ class ChatModelFactoryTests(unittest.TestCase):
 
 
 class AnswerGenerationTests(unittest.TestCase):
+    @patch("app.api.llm.get_chat_model_client")
+    def test_answers_directly_without_searching(self, get_client) -> None:
+        model = Mock()
+        tool_model = Mock()
+        model.bind_tools.return_value = tool_model
+        tool_model.invoke.return_value = AIMessage(
+            content="Hello! How can I help?"
+        )
+        get_client.return_value = ChatModelClient(
+            LLMProvider.OPENAI,
+            "test-model",
+            model,
+        )
+        search = Mock()
+
+        result = generate_tool_driven_answer(
+            "Hello",
+            LLMProvider.OPENAI,
+            search,
+        )
+
+        self.assertEqual(result.answer, "Hello! How can I help?")
+        self.assertFalse(result.retrieval_used)
+        self.assertEqual(result.chunks, ())
+        search.assert_not_called()
+        model.invoke.assert_not_called()
+
+    @patch("app.api.llm.get_chat_model_client")
+    def test_executes_the_search_tool_and_generates_grounded_answer(
+        self,
+        get_client,
+    ) -> None:
+        model = Mock()
+        tool_model = Mock()
+        model.bind_tools.return_value = tool_model
+        tool_model.invoke.return_value = AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "search_employee_knowledge",
+                    "args": {"query": "vacation policy"},
+                    "id": "call-1",
+                    "type": "tool_call",
+                }
+            ],
+        )
+        model.invoke.return_value = AIMessage(
+            content="Employees receive 15 vacation days [1]."
+        )
+        get_client.return_value = ChatModelClient(
+            LLMProvider.OPENAI,
+            "test-model",
+            model,
+        )
+        search = Mock(return_value=[retrieved_chunk()])
+
+        result = generate_tool_driven_answer(
+            "How much vacation do employees receive?",
+            LLMProvider.OPENAI,
+            search,
+        )
+
+        self.assertTrue(result.retrieval_used)
+        self.assertEqual(result.retrieval_query, "vacation policy")
+        self.assertEqual(result.chunks, (retrieved_chunk(),))
+        self.assertIn("15 vacation days", result.answer)
+        search.assert_called_once_with("vacation policy")
+        grounded_messages = model.invoke.call_args.args[0]
+        self.assertIn("handbook.md", grounded_messages[1].content)
+        self.assertIsNotNone(result.usage)
+
+    @patch("app.api.llm.get_chat_model_client")
+    def test_explains_when_the_model_cannot_call_tools(self, get_client) -> None:
+        model = Mock()
+        tool_model = Mock()
+        model.bind_tools.return_value = tool_model
+        tool_model.invoke.side_effect = RuntimeError(
+            "tools are not supported by this model"
+        )
+        get_client.return_value = ChatModelClient(
+            LLMProvider.HUGGINGFACE,
+            "model-without-tools",
+            model,
+        )
+
+        with self.assertRaisesRegex(
+            LLMProviderRequestError,
+            "tool-capable model",
+        ):
+            generate_tool_driven_answer(
+                "What is our vacation policy?",
+                LLMProvider.HUGGINGFACE,
+                Mock(),
+            )
+
     @patch("app.api.llm.get_chat_model_client")
     def test_generates_an_answer_from_retrieved_context(self, get_client) -> None:
         model = Mock()

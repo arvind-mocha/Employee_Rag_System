@@ -29,10 +29,11 @@ class AnswerRequest(RetrievalRequest):
 
 
 class AnswerResponse(RetrievalRequest):
-    """A grounded answer and the retrieved chunks supplied to its model."""
+    """A direct or retrieval-grounded answer produced by the chat model."""
 
     effective_query: str
     applied_strategies: list[str]
+    retrieval_used: bool
     provider: str
     model: str
     answer: str

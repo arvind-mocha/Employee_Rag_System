@@ -31,6 +31,25 @@ class IngestionPathTests(unittest.TestCase):
             max_workers=ingest.MAX_WORKERS,
         )
 
+    @patch("app.ingestion.ingest.write_evaluation_corpus_snapshot")
+    @patch(
+        "app.ingestion.ingest.process_3",
+        side_effect=RuntimeError("index failed"),
+    )
+    @patch("app.ingestion.ingest.process_2", return_value=[])
+    @patch("app.ingestion.ingest.process_1", return_value=[])
+    def test_does_not_publish_a_snapshot_when_indexing_fails(
+        self,
+        _process_1,
+        _process_2,
+        _process_3,
+        write_snapshot,
+    ) -> None:
+        with self.assertRaisesRegex(RuntimeError, "index failed"):
+            ingest.main()
+
+        write_snapshot.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -76,9 +76,12 @@ function AnswerPanel({ response }: { response: AnswerResponse }) {
           <Sparkles size={18} />
         </div>
         <div>
-          <span>Grounded answer</span>
+          <span>{response.retrieval_used ? 'Grounded answer' : 'Direct answer'}</span>
           <small>
-            {providerName(response.provider)} · {response.sources.length} sources
+            {providerName(response.provider)} ·{' '}
+            {response.retrieval_used
+              ? `${response.sources.length} sources`
+              : 'knowledge search skipped'}
           </small>
         </div>
         <button className="icon-button" type="button" onClick={copyAnswer}>
@@ -109,7 +112,11 @@ function ChunkPanel({ response }: { response: AnswerResponse }) {
         <div className="developer-chunks-heading">
           <div>
             <span>Retrieved evidence</span>
-            <small>No chunks were returned for this question.</small>
+            <small>
+              {response.retrieval_used
+                ? 'The knowledge search returned no relevant chunks.'
+                : 'The model answered without using the knowledge-search tool.'}
+            </small>
           </div>
         </div>
       </section>
@@ -216,7 +223,11 @@ function RequestPanel({
   latency: number
 }) {
   const details = [
-    ['Effective query', response.effective_query],
+    [
+      'Effective query',
+      response.retrieval_used ? response.effective_query : 'Not used',
+    ],
+    ['Knowledge search', response.retrieval_used ? 'Used' : 'Skipped'],
     ['Provider', providerName(response.provider)],
     ['Model', response.model],
     ['Latency', milliseconds(latency)],
@@ -242,6 +253,7 @@ function RequestPanel({
           {response.applied_strategies.map((strategy) => (
             <i key={strategy}>{strategy.replaceAll('_', ' ')}</i>
           ))}
+          {!response.applied_strategies.length && <i>none — tool not used</i>}
         </div>
       </div>
       <details className="request-json">
@@ -312,6 +324,7 @@ export function AskPage({ developerMode }: { developerMode: boolean }) {
     if (!canSubmit) return
     const request = buildRequest(question, provider, retrieval)
     setLastRequest(request)
+    setQuestion('')
     answerMutation.mutate(request)
   }
 

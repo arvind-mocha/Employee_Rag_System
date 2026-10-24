@@ -31,14 +31,25 @@ class StoredArchive:
 
     structured_files: list[str]
     unstructured_files: list[str]
+    ignored_files: list[str]
+    renamed_files: dict[str, str]
 
     @property
     def total_files(self) -> int:
         return len(self.structured_files) + len(self.unstructured_files)
 
 
+@dataclass(frozen=True, slots=True)
+class PlannedArchive:
+    """Validated archive members and the decisions made for each one."""
+
+    files: list[PlannedFile]
+    ignored_files: list[str]
+    renamed_files: dict[str, str]
+
+
 def _stored_names() -> set[str]:
-    """Return existing filenames so an upload cannot silently overwrite data."""
+    """Return existing filenames reserved across both source directories."""
     names: set[str] = set()
     for directory in (config.DATA_DIRECTORY, config.STRUCTURED_DATA_DIRECTORY):
         if directory.exists():
@@ -69,22 +80,38 @@ def _safe_flat_filename(member_name: str) -> str:
     return filename
 
 
-def _category_for(filename: str) -> FileCategory:
+def _category_for(filename: str) -> FileCategory | None:
     extension = Path(filename).suffix.lower()
     if extension in config.STRUCTURED_EXTENSIONS:
         return "structured"
     if extension in config.UNSTRUCTURED_EXTENSIONS:
         return "unstructured"
-    raise ZipStorageError(
-        HTTPStatus.UNSUPPORTED_MEDIA_TYPE,
-        f"Unsupported file type: {filename}",
-    )
+    return None
 
 
-def _plan_files(archive: ZipFile) -> list[PlannedFile]:
+def _available_filename(filename: str, reserved_names: set[str]) -> str:
+    """Reserve a case-insensitively unique flattened filename."""
+    if filename.casefold() not in reserved_names:
+        reserved_names.add(filename.casefold())
+        return filename
+
+    path = Path(filename)
+    counter = 1
+    while True:
+        candidate = f"{path.stem}_{counter}{path.suffix}"
+        if candidate.casefold() not in reserved_names:
+            reserved_names.add(candidate.casefold())
+            return candidate
+        counter += 1
+
+
+def _plan_files(archive: ZipFile) -> PlannedArchive:
     planned_files: list[PlannedFile] = []
-    upload_names: set[str] = set()
+    ignored_files: list[str] = []
+    renamed_files: dict[str, str] = {}
+    reserved_names = _stored_names()
     uncompressed_size = 0
+    file_count = 0
 
     for member in archive.infolist():
         if member.is_dir():
@@ -96,24 +123,20 @@ def _plan_files(archive: ZipFile) -> list[PlannedFile]:
         if "__MACOSX" in member_parts or filename == ".DS_Store":
             continue
 
-        normalized_name = filename.casefold()
-        if normalized_name in upload_names:
-            raise ZipStorageError(
-                HTTPStatus.CONFLICT,
-                f"Duplicate filename after flattening ZIP folders: {filename}",
-            )
-
-        upload_names.add(normalized_name)
+        file_count += 1
         uncompressed_size += member.file_size
-        planned_files.append((member, filename, _category_for(filename)))
 
-    if not planned_files:
-        raise ZipStorageError(
-            HTTPStatus.BAD_REQUEST,
-            "The ZIP does not contain any supported files.",
-        )
+        category = _category_for(filename)
+        if category is None:
+            ignored_files.append(member.filename)
+            continue
 
-    if len(planned_files) > config.MAX_FILE_COUNT:
+        stored_filename = _available_filename(filename, reserved_names)
+        if stored_filename != filename:
+            renamed_files[member.filename] = stored_filename
+        planned_files.append((member, stored_filename, category))
+
+    if file_count > config.MAX_FILE_COUNT:
         raise ZipStorageError(
             HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
             f"The ZIP contains more than {config.MAX_FILE_COUNT} files.",
@@ -125,14 +148,17 @@ def _plan_files(archive: ZipFile) -> list[PlannedFile]:
             "The uncompressed files are larger than 200 MB.",
         )
 
-    conflicts = sorted(upload_names & _stored_names())
-    if conflicts:
+    if not planned_files:
         raise ZipStorageError(
-            HTTPStatus.CONFLICT,
-            f"Files already exist: {', '.join(conflicts)}",
+            HTTPStatus.BAD_REQUEST,
+            "The ZIP does not contain any supported files.",
         )
 
-    return planned_files
+    return PlannedArchive(
+        files=planned_files,
+        ignored_files=ignored_files,
+        renamed_files=renamed_files,
+    )
 
 
 def _extract_files(archive: ZipFile, planned_files: list[PlannedFile]) -> None:
@@ -174,7 +200,7 @@ def store_zip_archive(archive_bytes: bytes) -> StoredArchive:
     archive_stream.seek(0)
     try:
         with ZipFile(archive_stream) as archive:
-            planned_files = _plan_files(archive)
+            plan = _plan_files(archive)
 
             corrupt_member = archive.testzip()
             if corrupt_member is not None:
@@ -183,7 +209,7 @@ def store_zip_archive(archive_bytes: bytes) -> StoredArchive:
                     f"Corrupt file in ZIP: {corrupt_member}",
                 )
 
-            _extract_files(archive, planned_files)
+            _extract_files(archive, plan.files)
     except BadZipFile as error:
         raise ZipStorageError(
             HTTPStatus.BAD_REQUEST,
@@ -193,12 +219,14 @@ def store_zip_archive(archive_bytes: bytes) -> StoredArchive:
     return StoredArchive(
         structured_files=[
             filename
-            for _, filename, category in planned_files
+            for _, filename, category in plan.files
             if category == "structured"
         ],
         unstructured_files=[
             filename
-            for _, filename, category in planned_files
+            for _, filename, category in plan.files
             if category == "unstructured"
         ],
+        ignored_files=plan.ignored_files,
+        renamed_files=plan.renamed_files,
     )

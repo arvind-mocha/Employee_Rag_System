@@ -7,16 +7,22 @@ from app.api.llm import GeneratedAnswer, GeneratedText, LLMProvider
 from app.api.llm_usage import LLMUsage
 from app.evaluation.dataset import text_sha256
 from app.evaluation.engine import (
+    QUESTION_GENERATION_BASE_OUTPUT_TOKENS,
+    QUESTION_GENERATION_CATEGORY_BATCH_SIZE,
+    QUESTION_GENERATION_OUTPUT_TOKENS_PER_QUESTION,
     evaluate_record,
+    generate_evaluation_questions,
     generate_ground_truth_records,
     run_evaluation,
 )
 from app.evaluation.models import (
     EvidenceSnapshot,
+    EvaluationCategory,
     GroundTruthRecord,
     GroundTruthStatus,
     RetrievalConfiguration,
 )
+from app.ingestion.chunker import DocumentChunk
 from app.retrieval.models import RetrievedChunk
 
 
@@ -74,6 +80,153 @@ def record() -> GroundTruthRecord:
 
 class GroundTruthGenerationTests(unittest.TestCase):
     @patch("app.evaluation.engine.invoke_chat_model")
+    def test_generates_balanced_questions_for_every_category(self, invoke) -> None:
+        generated_questions = [
+            {
+                "question": f"Test question for {category.value}?",
+                "category": category.value,
+                "relevant_evidence_numbers": (
+                    []
+                    if category is EvaluationCategory.UNANSWERABLE
+                    else [1]
+                ),
+            }
+            for category in EvaluationCategory
+        ]
+        invoke.side_effect = [
+            GeneratedText(
+                json.dumps(
+                    {
+                        "questions": generated_questions[
+                            start : start + QUESTION_GENERATION_CATEGORY_BATCH_SIZE
+                        ]
+                    }
+                ),
+                LLMProvider.OPENAI,
+                "reference-model",
+                llm_usage(0.001),
+            )
+            for start in range(
+                0,
+                len(generated_questions),
+                QUESTION_GENERATION_CATEGORY_BATCH_SIZE,
+            )
+        ]
+        chunks = [
+            DocumentChunk(
+                chunk_id="chunk-1",
+                content="Employees receive 15 vacation days annually.",
+                source_file="handbook.md",
+                source_type="markdown",
+                section="Vacation",
+                chunk_index=0,
+            )
+        ]
+
+        questions, usage, evidence_hints = generate_evaluation_questions(
+            LLMProvider.OPENAI,
+            1,
+            chunks=chunks,
+        )
+
+        self.assertEqual(len(questions), len(EvaluationCategory))
+        self.assertEqual(
+            {question.category for question in questions},
+            set(EvaluationCategory),
+        )
+        self.assertEqual(len(usage), 3)
+        self.assertTrue(
+            all(item and item.estimated_cost_usd == 0.001 for item in usage)
+        )
+        self.assertEqual(invoke.call_count, 3)
+        self.assertEqual(
+            evidence_hints[
+                "test question for direct_fact?"
+            ][0].chunk_id,
+            "chunk-1",
+        )
+        self.assertEqual(
+            evidence_hints["test question for unanswerable?"],
+            [],
+        )
+        first_call = invoke.call_args_list[0]
+        messages = first_call.args[0]
+        self.assertIn("untrusted", messages[0].content)
+        self.assertIn("handbook.md", messages[1].content)
+        self.assertIn(
+            "direct_fact, temporal, spanning",
+            messages[1].content,
+        )
+        self.assertEqual(
+            first_call.kwargs["max_output_tokens"],
+            QUESTION_GENERATION_BASE_OUTPUT_TOKENS
+            + QUESTION_GENERATION_CATEGORY_BATCH_SIZE
+            * QUESTION_GENERATION_OUTPUT_TOKENS_PER_QUESTION,
+        )
+
+    def test_rejects_generation_without_ingested_chunks(self) -> None:
+        with self.assertRaisesRegex(ValueError, "No ingested content"):
+            generate_evaluation_questions(
+                LLMProvider.OPENAI,
+                1,
+                chunks=[],
+            )
+
+    @patch("app.evaluation.engine.invoke_chat_model")
+    def test_rejects_a_blank_generated_question(self, invoke) -> None:
+        generated_questions = [
+            {
+                "question": (
+                    "   "
+                    if category is EvaluationCategory.DIRECT_FACT
+                    else f"Test question for {category.value}?"
+                ),
+                "category": category.value,
+                "relevant_evidence_numbers": (
+                    []
+                    if category is EvaluationCategory.UNANSWERABLE
+                    else [1]
+                ),
+            }
+            for category in EvaluationCategory
+        ]
+        invoke.side_effect = [
+            GeneratedText(
+                json.dumps(
+                    {
+                        "questions": generated_questions[
+                            start : start + QUESTION_GENERATION_CATEGORY_BATCH_SIZE
+                        ]
+                    }
+                ),
+                LLMProvider.OPENAI,
+                "reference-model",
+                llm_usage(0.001),
+            )
+            for start in range(
+                0,
+                len(generated_questions),
+                QUESTION_GENERATION_CATEGORY_BATCH_SIZE,
+            )
+        ]
+
+        with self.assertRaisesRegex(ValueError, "blank question"):
+            generate_evaluation_questions(
+                LLMProvider.OPENAI,
+                1,
+                chunks=[
+                    DocumentChunk(
+                        chunk_id="chunk-1",
+                        content="Employees receive 15 vacation days annually.",
+                        source_file="handbook.md",
+                        source_type="markdown",
+                        section="Vacation",
+                        chunk_index=0,
+                    )
+                ],
+            )
+
+    @patch("app.evaluation.engine.invoke_chat_model")
     def test_generates_atomic_ground_truth_with_evidence(self, invoke) -> None:
         router = Mock()
         router.search.return_value = [retrieved_chunk()]
@@ -82,6 +235,8 @@ class GroundTruthGenerationTests(unittest.TestCase):
                 {
                     "answerable": True,
                     "reference_answer": "Employees receive 15 days annually.",
+                    "category": "direct_fact",
+                    "keywords": ["15 days", "vacation"],
                     "required_facts": ["15 days", "annual entitlement"],
                     "relevant_evidence_numbers": [1],
                 }
@@ -100,10 +255,86 @@ class GroundTruthGenerationTests(unittest.TestCase):
 
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0].required_facts[0], "15 days")
+        self.assertEqual(records[0].category, "direct_fact")
+        self.assertEqual(records[0].keywords, ["15 days", "vacation"])
         self.assertEqual(len(records[0].retrieved_evidence), 1)
         self.assertEqual(records[0].relevant_evidence[0].chunk_id, "chunk-1")
         self.assertEqual(records[0].review_status, "machine_generated")
         self.assertEqual(records[0].reference_usage.estimated_cost_usd, 0.001)
+
+    @patch("app.evaluation.engine.invoke_chat_model")
+    def test_uses_source_anchors_when_retrieval_misses(self, invoke) -> None:
+        router = Mock()
+        router.search.return_value = []
+        invoke.return_value = GeneratedText(
+            json.dumps(
+                {
+                    "answerable": True,
+                    "reference_answer": "Employees receive 15 days annually.",
+                    "category": "direct_fact",
+                    "keywords": ["15 days", "vacation"],
+                    "required_facts": ["15 days", "annual entitlement"],
+                    "relevant_evidence_numbers": [1],
+                }
+            ),
+            LLMProvider.OPENAI,
+            "reference-model",
+            llm_usage(0.001),
+        )
+        anchor = DocumentChunk(
+            chunk_id="chunk-1",
+            content="Employees receive 15 vacation days annually.",
+            source_file="handbook.md",
+            source_type="markdown",
+            section="Vacation",
+            chunk_index=0,
+        )
+
+        records = generate_ground_truth_records(
+            ["How many vacation days?"],
+            LLMProvider.OPENAI,
+            RetrievalConfiguration(),
+            router=router,
+            evidence_hints={"how many vacation days?": [anchor]},
+        )
+
+        self.assertTrue(records[0].answerable)
+        self.assertEqual(records[0].relevant_evidence[0].chunk_id, "chunk-1")
+        messages = invoke.call_args.args[0]
+        self.assertIn("Employees receive 15 vacation days", messages[1].content)
+
+    @patch("app.evaluation.engine.invoke_chat_model")
+    def test_assigns_unanswerable_category_when_evidence_is_insufficient(
+        self,
+        invoke,
+    ) -> None:
+        router = Mock()
+        router.search.return_value = []
+        invoke.return_value = GeneratedText(
+            json.dumps(
+                {
+                    "answerable": False,
+                    "reference_answer": "The documents do not contain this information.",
+                    "category": "direct_fact",
+                    "keywords": ["unsupported"],
+                    "required_facts": [],
+                    "relevant_evidence_numbers": [],
+                }
+            ),
+            LLMProvider.OPENAI,
+            "reference-model",
+            llm_usage(0.001),
+        )
+
+        records = generate_ground_truth_records(
+            ["What is the office Wi-Fi password?"],
+            LLMProvider.OPENAI,
+            RetrievalConfiguration(),
+            router=router,
+        )
+
+        self.assertEqual(records[0].category, "unanswerable")
+        self.assertEqual(records[0].keywords, [])
 
 
 class EvaluationEngineTests(unittest.TestCase):
@@ -158,6 +389,7 @@ class EvaluationEngineTests(unittest.TestCase):
         )
 
         self.assertTrue(result.passed)
+        self.assertEqual(result.category, "direct_fact")
         self.assertEqual(result.answer_scores.correctness, 1.0)
         self.assertEqual(result.answer_scores.semantic_similarity, 0.91)
         self.assertEqual(result.answer_scores.citation_validity, 1.0)

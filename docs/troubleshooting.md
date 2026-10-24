@@ -96,13 +96,13 @@ ZIP does not normally need to be uploaded again.
 | Error | Meaning |
 | --- | --- |
 | Not a valid ZIP | Content is not a readable ZIP archive |
-| Unsupported file type | At least one member has an unsupported extension |
+| No supported files | Every usable member has an unsupported extension |
 | Unsafe path | An archive member uses an absolute path or path traversal |
-| Duplicate filename | Folder flattening produced the same filename twice |
-| Files already exist | An uploaded filename would overwrite stored data |
 | Too large | Compressed size, extracted size, or file count exceeds a limit |
 
-Uploads never silently overwrite existing source files.
+Unsupported members in a mixed archive are ignored. Duplicate flattened names
+and conflicts with stored files receive numeric suffixes, so uploads never
+silently overwrite existing source files.
 
 ## No model provider is available
 

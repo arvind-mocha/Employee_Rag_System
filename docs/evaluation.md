@@ -24,20 +24,32 @@ block an HTTP request.
 
 ## Create a dataset
 
-There are three supported workflows.
+There are two supported generation workflows. The customer-facing frontend
+generates the JSONL internally instead of asking users to prepare or upload it.
 
 ### Generate from the frontend
 
 1. Open **Evaluation** in Developer mode.
 2. Select dataset generation.
-3. Enter a dataset name and up to 100 questions.
+3. Enter a dataset name and choose one to five questions per category.
 4. Select the reference provider.
 5. Select the retrieval strategies.
 6. Queue generation and wait for the worker.
 
-The reference provider receives current retrieved evidence and produces an
-answerability decision, reference answer, required facts, and relevant evidence
-positions.
+To remove a stored dataset, enter or select its name on the Evaluation page,
+choose the trash action beside the dataset field, and confirm the deletion.
+Deleting evaluation ground truth does not remove ingested source documents.
+
+The worker reuses the cleaned documents and structured-data artifacts retained
+by ingestion. It selects source-diverse excerpts and asks the reference provider
+to generate balanced questions across all nine categories in bounded batches.
+The generator identifies the source excerpts supporting each answerable question;
+those anchors are preserved when retrieval evidence is added, so a retrieval miss
+does not incorrectly turn an answerable case into an unanswerable one. The worker
+then produces an answerability decision, expected keywords, reference answer,
+required facts, and relevant evidence positions.
+Generation starts only when **Generate ground truth** is selected. One to five
+questions per category produces 9 to 45 records.
 
 ### Generate from the command line
 
@@ -64,21 +76,12 @@ Optional Boolean flags include semantic search, keyword search, query rewriting,
 reranking, and source diversity. Each flag also accepts its `--no-...` form.
 Use `--overwrite` only when replacing a dataset intentionally.
 
-### Upload an existing JSONL dataset
-
-The Evaluation page accepts a `.jsonl` file that matches the validated
-ground-truth schema. The server rejects invalid UTF-8, malformed JSON, invalid
-records, unsupported extensions, oversized data, and more than 100 records.
-
-Structural validation does not prove that a reference answer is correct. Human
-review is still required.
-
 ## Ground-truth records
 
 Each record contains:
 
 - Stable record ID and schema version
-- Question and answerability
+- Question, answerability, evaluation category, and expected keywords
 - Reference answer and atomic required facts
 - Retrieved and relevant evidence snapshots
 - Chunk IDs, sources, sections, positions, and content hashes
@@ -86,6 +89,12 @@ Each record contains:
 - Reference provider, model, generation time, and usage
 - Retrieval configuration used during generation
 - Review status
+
+The reference model assigns one primary category to every generated record:
+`direct_fact`, `temporal`, `spanning`, `relationship`, `numerical`,
+`comparative`, `holistic`, `procedural`, or `unanswerable`. These stored
+categories are carried into evaluation results and drive the category
+performance chart; the frontend does not infer them from question wording.
 
 Generated records start with `review_status: machine_generated`. After verifying
 the question, answer, facts, and evidence, change the status to `approved`. Do

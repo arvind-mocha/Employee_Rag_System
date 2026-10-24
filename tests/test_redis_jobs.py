@@ -29,7 +29,7 @@ class RedisEvaluationJobApiTests(unittest.TestCase):
             "/api/v1/evaluations/datasets/generate/async",
             json={
                 "dataset_name": "employee-policies",
-                "questions": ["How many vacation days?"],
+                "questions_per_category": 1,
                 "reference_provider": "openai",
             },
         )
@@ -49,6 +49,11 @@ class RedisEvaluationJobApiTests(unittest.TestCase):
         self.assertEqual(
             enqueue_call.kwargs["meta"]["job_type"],
             "dataset_generation",
+        )
+        self.assertIsNone(enqueue_call.kwargs["args"][0]["questions"])
+        self.assertEqual(
+            enqueue_call.kwargs["args"][0]["questions_per_category"],
+            1,
         )
 
     @patch("app.api.controllers.evaluation_jobs.get_evaluation_queue")

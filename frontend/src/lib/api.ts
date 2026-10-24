@@ -2,6 +2,7 @@ import type {
   AnswerRequest,
   AnswerResponse,
   DataUploadResponse,
+  DeleteEvaluationDatasetResponse,
   EvaluationJobAccepted,
   EvaluationJobStatus,
   IngestionStartResponse,
@@ -11,7 +12,7 @@ import type {
   ProviderCredentialListResponse,
   ProviderCredentialRequest,
   RetrievalOptions,
-  UploadEvaluationDatasetResponse,
+  VectorDatabaseEraseResponse,
 } from '../types/api'
 
 const API_ROOT = '/api/v1'
@@ -97,12 +98,17 @@ export const api = {
       method: 'POST',
     }),
 
+  eraseVectorDatabase: () =>
+    request<VectorDatabaseEraseResponse>('/data/vector-database', {
+      method: 'DELETE',
+    }),
+
   getIngestionStatus: () =>
     request<IngestionStatusResponse>('/ingestion/status'),
 
   generateDataset: (payload: {
     dataset_name: string
-    questions: string[]
+    questions_per_category: number
     reference_provider: Provider
     overwrite: boolean
   } & RetrievalOptions) =>
@@ -111,23 +117,11 @@ export const api = {
       body: JSON.stringify(payload),
     }),
 
-  uploadDataset: (payload: {
-    dataset_name: string
-    dataset_file: File
-    overwrite: boolean
-  }) => {
-    const form = new FormData()
-    form.append('dataset_name', payload.dataset_name)
-    form.append('dataset_file', payload.dataset_file)
-    form.append('overwrite', String(payload.overwrite))
-    return request<UploadEvaluationDatasetResponse>(
-      '/evaluations/datasets/upload',
-      {
-        method: 'POST',
-        body: form,
-      },
-    )
-  },
+  deleteDataset: (datasetName: string) =>
+    request<DeleteEvaluationDatasetResponse>(
+      `/evaluations/datasets/${encodeURIComponent(datasetName)}`,
+      { method: 'DELETE' },
+    ),
 
   runEvaluation: (payload: {
     dataset_name: string

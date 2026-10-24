@@ -1,4 +1,8 @@
-import type { EvaluationResult, Provider } from '../types/api'
+import type {
+  EvaluationCategory,
+  EvaluationResult,
+  Provider,
+} from '../types/api'
 
 export const PROVIDERS: Array<{
   id: Provider
@@ -37,41 +41,26 @@ export const DEFAULT_RETRIEVAL = {
   source_diversity: false,
 }
 
-export const CATEGORIES = [
-  'Leave & Attendance',
-  'Benefits & Compensation',
-  'Policies & Compliance',
-  'Roles & Employee Information',
-  'Company, Culture & Careers',
-] as const
-
-export type EvaluationCategory = (typeof CATEGORIES)[number]
-
-const CATEGORY_TERMS: Array<[EvaluationCategory, string[]]> = [
-  [
-    'Leave & Attendance',
-    ['vacation', 'leave', 'holiday', 'attendance', 'sick', 'pto', 'time off', 'absence'],
-  ],
-  [
-    'Benefits & Compensation',
-    ['benefit', 'salary', 'compensation', 'bonus', 'insurance', 'pay', 'pension', 'retirement', 'reimbursement'],
-  ],
-  [
-    'Policies & Compliance',
-    ['policy', 'compliance', 'conduct', 'security', 'privacy', 'harassment', 'required', 'rule'],
-  ],
-  [
-    'Roles & Employee Information',
-    ['role', 'manager', 'employee', 'department', 'team', 'report', 'title', 'responsibility'],
-  ],
+export const CATEGORIES: Array<{
+  id: EvaluationCategory
+  label: string
+  shortLabel: string
+}> = [
+  { id: 'direct_fact', label: 'Direct fact', shortLabel: 'Fact' },
+  { id: 'temporal', label: 'Temporal', shortLabel: 'Time' },
+  { id: 'spanning', label: 'Spanning', shortLabel: 'Multi-hop' },
+  { id: 'relationship', label: 'Relationship', shortLabel: 'Relation' },
+  { id: 'numerical', label: 'Numerical', shortLabel: 'Number' },
+  { id: 'comparative', label: 'Comparative', shortLabel: 'Compare' },
+  { id: 'holistic', label: 'Holistic', shortLabel: 'Holistic' },
+  { id: 'procedural', label: 'Procedural', shortLabel: 'Process' },
+  { id: 'unanswerable', label: 'Unanswerable', shortLabel: 'No answer' },
 ]
 
-export function classifyQuestion(question: string): EvaluationCategory {
-  const normalized = question.toLowerCase()
-  for (const [category, terms] of CATEGORY_TERMS) {
-    if (terms.some((term) => normalized.includes(term))) return category
-  }
-  return 'Company, Culture & Careers'
+export function categoryLabel(
+  category: EvaluationCategory | null | undefined,
+): string {
+  return CATEGORIES.find((item) => item.id === category)?.label ?? 'Direct fact'
 }
 
 export function providerName(provider: string): string {
