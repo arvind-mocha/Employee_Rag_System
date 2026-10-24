@@ -22,15 +22,17 @@ flowchart TB
     end
 
     subgraph Retrieval["Question answering"]
-        API --> Router[Query router]
+        API --> Provider[Selected LLM with knowledge-search tool]
+        Provider -->|organization-specific question| Router[Query router]
+        Provider -->|general question| Response[Direct answer]
         Router --> Semantic[PGVector similarity search]
         Router --> Keyword[PostgreSQL full-text search]
         Semantic --> PG
         Keyword --> PG
         Semantic --> Rank[Deduplicate, fuse, rerank, diversify]
         Keyword --> Rank
-        Rank --> Provider[Selected LLM provider]
-        Provider --> Response[Grounded answer and sources]
+        Rank --> Grounded[Grounded answer generation]
+        Grounded --> Response
         Response --> UI
     end
 
@@ -39,7 +41,7 @@ flowchart TB
         EvaluationAPI -->|enqueue| Redis
         Redis --> Worker[RQ worker]
         Worker --> Router
-        Worker --> Provider
+        Worker --> Grounded
         Worker --> Judge[LLM judge and deterministic metrics]
         Judge -->|job result| Redis
         Redis --> UI
@@ -57,7 +59,7 @@ flowchart TB
 | FastAPI application | Validated REST endpoints, ingestion orchestration, retrieval, answers, settings, and job submission |
 | Ingestion pipeline | Text extraction, normalization, chunking, metadata creation, embeddings, and indexing |
 | Query router | Semantic and keyword search selection, hybrid fusion, rewriting, reranking, and source diversity |
-| LLM layer | Provider selection, grounded prompting, upstream error handling, usage, and cost calculation |
+| LLM layer | Provider selection, knowledge-search tool choice, grounded prompting, upstream error handling, usage, and cost calculation |
 | Evaluation engine | Ground-truth generation, freshness checks, answer comparison, judging, and aggregation |
 | RQ worker | Executes asynchronous dataset-generation and evaluation jobs |
 | PostgreSQL/PGVector | Vectors, chunk metadata, full-text retrieval data, and encrypted provider credentials |
@@ -111,14 +113,21 @@ The query router accepts five independent controls:
 - Local embedding reranking
 - Source diversity
 
+The selected LLM first receives a `search_employee_knowledge` tool. It calls the
+tool for organization-specific questions and answers general requests directly.
+The query router, embedding model, and PGVector connection are initialized only
+when the tool is called.
+
 When semantic and keyword search are both enabled, their ranked results are
 deduplicated and combined with reciprocal-rank fusion. Candidate retrieval uses
 up to 20 chunks when reranking or diversification is requested; the final
 response contains at most five chunks.
 
-The selected chunks and their metadata are supplied to one configured LLM. The
-API returns the answer, provider, model, usage, effective query, applied
-strategies, and source chunks.
+When retrieval is used, the selected chunks and their metadata are supplied to
+the configured LLM in a separate grounded prompt. The API returns whether the
+tool was used, the answer, provider, model, combined usage, effective query,
+applied strategies, and source chunks. Evaluation deliberately continues to
+retrieve for every case so it measures the configured RAG pipeline consistently.
 
 The backend does not maintain conversation history and does not automatically
 ingest chat messages. Each answer request is processed independently.

@@ -13,6 +13,22 @@ Do not invent policies, dates, names, amounts, or other facts.
 Cite supporting sources inline using their bracketed numbers, such as [1].
 Keep the answer concise and directly useful."""
 
+CHAT_TOOL_SYSTEM_PROMPT = """You are a helpful employee assistant with access to a
+search_employee_knowledge tool.
+
+Use the tool whenever an answer depends on organization-specific information,
+including employee records, company policies, benefits, compensation, leave,
+teams, internal processes, or the contents of uploaded documents. Never answer
+those questions from memory.
+
+Do not use the tool for greetings, thanks, capability questions, general writing
+help, calculations, or general knowledge that does not depend on this
+organization. Answer those requests directly. If you are uncertain whether a
+request depends on organization-specific information, use the tool.
+
+Call the tool at most once. Use a concise search query that preserves the user's
+meaning. Do not invent organization-specific facts."""
+
 
 def format_retrieval_context(chunks: list[RetrievedChunk]) -> str:
     """Format retrieved chunks as numbered, attributable prompt context."""
@@ -41,4 +57,12 @@ def build_answer_messages(
                 "Answer using only the context and include source citations."
             )
         ),
+    ]
+
+
+def build_tool_selection_messages(question: str) -> list[BaseMessage]:
+    """Ask the model whether employee-knowledge retrieval is necessary."""
+    return [
+        SystemMessage(content=CHAT_TOOL_SYSTEM_PROMPT),
+        HumanMessage(content=question.strip()),
     ]

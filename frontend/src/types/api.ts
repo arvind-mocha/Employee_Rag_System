@@ -106,6 +106,7 @@ export interface AnswerResponse extends RetrievalOptions {
   question: string
   effective_query: string
   applied_strategies: string[]
+  retrieval_used: boolean
   provider: string
   model: string
   answer: string

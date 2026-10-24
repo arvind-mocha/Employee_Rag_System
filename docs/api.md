@@ -21,7 +21,7 @@ Ingestion states are `idle`, `pending`, `running`, `completed`, and `failed`.
 | Method | Endpoint | Success | Purpose |
 | --- | --- | --- | --- |
 | `GET` | `/retrieval/search` | `200` | Retrieve relevant chunks without calling an LLM |
-| `POST` | `/answers/generate` | `200` | Retrieve context and generate one grounded answer |
+| `POST` | `/answers/generate` | `200` | Let the LLM call employee-knowledge search when needed, then answer |
 
 Retrieval options are:
 
@@ -87,7 +87,7 @@ curl --get http://localhost:8000/api/v1/retrieval/search \
   --data 'reranking=true'
 ```
 
-### Generate a grounded answer
+### Generate a tool-directed answer
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/answers/generate \
@@ -107,7 +107,10 @@ curl -X POST http://localhost:8000/api/v1/answers/generate \
 ```
 
 At most one provider switch may be true. If none is selected, Hugging Face is
-the backend default.
+the backend default. The configured model must support tool calling. The
+response field `retrieval_used` reports whether the model called
+`search_employee_knowledge`; `sources` and `applied_strategies` are empty when
+the model answers directly. Retrieval settings apply only when the tool is used.
 
 ### Save a provider credential
 

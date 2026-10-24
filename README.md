@@ -13,6 +13,7 @@ estimated model cost.
 
 - Structured and unstructured document ingestion
 - Semantic, keyword, and hybrid retrieval
+- LLM-directed knowledge search that skips retrieval for general questions
 - Query rewriting, reranking, and source diversification
 - Grounded answers with retrieved sources
 - Hugging Face, OpenAI, Anthropic, and xAI Grok support
@@ -46,15 +47,17 @@ flowchart TB
     Ingestion --> Embeddings[Local Sentence Transformer embeddings]
     Embeddings --> DB[(PostgreSQL + PGVector)]
 
-    API --> Router[Query router]
+    API --> LLM[Selected LLM and knowledge-search tool]
+    LLM -->|employee or company question| Router[Query router]
+    LLM -->|general question| UI
     Router --> Semantic[Semantic search]
     Router --> Keyword[Full-text keyword search]
     Semantic --> DB
     Keyword --> DB
     Semantic --> Fusion[Fusion, reranking, and source diversity]
     Keyword --> Fusion
-    Fusion --> LLM[Selected LLM provider]
-    LLM --> UI
+    Fusion --> Grounded[Grounded LLM answer]
+    Grounded --> UI
 
     API --> Redis[(Redis)]
     Redis --> Worker[RQ evaluation worker]
@@ -179,9 +182,11 @@ The first run may take longer while the embedding model downloads.
 ### Ask questions
 
 1. Open **Ask** and select a configured provider.
-2. Enter an employee or company question.
-3. In Developer mode, optionally change the retrieval strategies.
-4. Review the grounded answer, sources, retrieved chunks, usage, and cost.
+2. Enter a question. The LLM calls employee-knowledge search only when the
+   answer depends on organization data.
+3. In Developer mode, optionally change the strategies used if retrieval runs.
+4. Review whether search was used, plus the answer, sources, retrieved chunks,
+   usage, and cost.
 
 ### Evaluate RAG quality
 
