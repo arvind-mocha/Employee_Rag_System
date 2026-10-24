@@ -48,7 +48,7 @@ those anchors are preserved when retrieval evidence is added, so a retrieval mis
 does not incorrectly turn an answerable case into an unanswerable one. The worker
 then produces an answerability decision, expected keywords, reference answer,
 required facts, and relevant evidence positions.
-Generation starts only when **Generate ground truth** is selected. One to five
+Generation starts only when **Generate dataset** is selected. One to five
 questions per category produces 9 to 45 records.
 
 ### Generate from the command line

@@ -33,7 +33,7 @@ class AnswerApiTests(unittest.TestCase):
 
     @patch("app.api.controllers.answer.generate_tool_driven_answer")
     @patch("app.api.controllers.answer.get_query_router")
-    def test_defaults_to_huggingface_and_returns_sources(
+    def test_defaults_to_gemini_and_returns_sources(
         self,
         get_query_router,
         generate_answer,
@@ -46,7 +46,7 @@ class AnswerApiTests(unittest.TestCase):
             return ToolDrivenAnswer(
                 "Employees receive 15 vacation days [1].",
                 provider,
-                "google/gemma-2-2b-it",
+                "gemini-3.5-flash-lite",
                 LLMUsage(
                     input_tokens=100,
                     output_tokens=10,
@@ -71,8 +71,8 @@ class AnswerApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         body = response.json()
-        self.assertEqual(body["provider"], "huggingface")
-        self.assertEqual(body["model"], "google/gemma-2-2b-it")
+        self.assertEqual(body["provider"], "gemini")
+        self.assertEqual(body["model"], "gemini-3.5-flash-lite")
         self.assertEqual(body["effective_query"], "vacation days employees receive")
         self.assertTrue(body["retrieval_used"])
         self.assertEqual(body["sources"][0]["chunk_id"], "chunk-1")
@@ -88,7 +88,7 @@ class AnswerApiTests(unittest.TestCase):
             generate_answer.call_args.args[:2],
             (
                 "How many vacation days do employees receive?",
-                LLMProvider.HUGGINGFACE,
+                LLMProvider.GEMINI,
             ),
         )
         self.assertTrue(callable(generate_answer.call_args.args[2]))
@@ -128,7 +128,7 @@ class AnswerApiTests(unittest.TestCase):
             "/api/v1/answers/generate",
             json={
                 "question": "Vacation policy?",
-                "hf": True,
+                "gemini": True,
                 "openai": True,
             },
         )
@@ -194,8 +194,8 @@ class AnswerApiTests(unittest.TestCase):
     ) -> None:
         get_query_router.return_value.search.return_value = [retrieved_chunk()]
         generate_answer.side_effect = LLMProviderRequestError(
-            LLMProvider.HUGGINGFACE,
-            "Hugging Face token needs Inference Providers permission.",
+            LLMProvider.GEMINI,
+            "Gemini rejected its configured API key.",
         )
 
         with self.assertLogs("app.api.controllers.answer", level="WARNING"):
@@ -205,7 +205,7 @@ class AnswerApiTests(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 502)
-        self.assertIn("Inference Providers", response.json()["detail"])
+        self.assertIn("configured API key", response.json()["detail"])
 
 
 if __name__ == "__main__":

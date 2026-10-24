@@ -1,4 +1,4 @@
-export type Provider = 'huggingface' | 'openai' | 'anthropic' | 'grok'
+export type Provider = 'gemini' | 'openai' | 'anthropic' | 'grok'
 
 export interface ProviderCredential {
   provider: Provider
@@ -108,7 +108,7 @@ export interface LlmUsageSummary {
 
 export interface AnswerRequest extends RetrievalOptions {
   question: string
-  hf: boolean
+  gemini: boolean
   openai: boolean
   anthropic: boolean
   grok: boolean

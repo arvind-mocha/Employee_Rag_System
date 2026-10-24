@@ -1,15 +1,18 @@
 """Selectable LangChain chat-model integrations for answer generation."""
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
+import json
 from typing import Any, Callable, Sequence
 
 from langchain_core.messages import BaseMessage
 from langchain_core.tools import tool
 from langchain_anthropic import ChatAnthropic
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
+from pydantic import BaseModel
 
 from app.api import config
 from app.api.llm_usage import LLMUsage, calculate_llm_usage
@@ -26,15 +29,14 @@ from app.core.credential_store import (
 from app.retrieval.models import RetrievedChunk
 
 
-DEFAULT_HF_MODEL = "google/gemma-2-2b-it"
-DEFAULT_HF_PROVIDER = config.HUGGINGFACE_INFERENCE_PROVIDER
+DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
 DEFAULT_GROK_BASE_URL = config.GROK_BASE_URL
 MAX_ANSWER_TOKENS = 512
 MODEL_TIMEOUT_SECONDS = 120
 
 
 class LLMProvider(StrEnum):
-    HUGGINGFACE = "huggingface"
+    GEMINI = "gemini"
     OPENAI = "openai"
     ANTHROPIC = "anthropic"
     GROK = "grok"
@@ -55,9 +57,8 @@ class LLMProviderRequestError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class LLMSettings:
-    hf_api_key: str
-    hf_model: str = DEFAULT_HF_MODEL
-    hf_provider: str = DEFAULT_HF_PROVIDER
+    gemini_api_key: str
+    gemini_model: str = DEFAULT_GEMINI_MODEL
     openai_api_key: str = ""
     openai_model: str = ""
     anthropic_api_key: str = ""
@@ -68,7 +69,7 @@ class LLMSettings:
 
     def model_for(self, provider: LLMProvider) -> str:
         models = {
-            LLMProvider.HUGGINGFACE: self.hf_model,
+            LLMProvider.GEMINI: self.gemini_model,
             LLMProvider.OPENAI: self.openai_model,
             LLMProvider.ANTHROPIC: self.anthropic_model,
             LLMProvider.GROK: self.grok_model,
@@ -77,7 +78,7 @@ class LLMSettings:
 
     def validate_provider(self, provider: LLMProvider) -> None:
         credentials = {
-            LLMProvider.HUGGINGFACE: self.hf_api_key,
+            LLMProvider.GEMINI: self.gemini_api_key,
             LLMProvider.OPENAI: self.openai_api_key,
             LLMProvider.ANTHROPIC: self.anthropic_api_key,
             LLMProvider.GROK: self.grok_api_key,
@@ -136,16 +137,16 @@ class ToolDrivenAnswer:
 
 def select_provider(
     *,
-    hf: bool = False,
+    gemini: bool = False,
     openai: bool = False,
     anthropic: bool = False,
     grok: bool = False,
 ) -> LLMProvider:
-    """Select one provider, defaulting to Hugging Face when none is enabled."""
+    """Select one provider, defaulting to Gemini when none is enabled."""
     enabled = [
         provider
         for provider, selected in (
-            (LLMProvider.HUGGINGFACE, hf),
+            (LLMProvider.GEMINI, gemini),
             (LLMProvider.OPENAI, openai),
             (LLMProvider.ANTHROPIC, anthropic),
             (LLMProvider.GROK, grok),
@@ -154,7 +155,7 @@ def select_provider(
     ]
     if len(enabled) > 1:
         raise ValueError("only one LLM provider can be enabled")
-    return enabled[0] if enabled else LLMProvider.HUGGINGFACE
+    return enabled[0] if enabled else LLMProvider.GEMINI
 
 
 def create_chat_model_client(
@@ -171,18 +172,12 @@ def create_chat_model_client(
     settings.validate_provider(provider)
     model_name = settings.model_for(provider)
 
-    if provider is LLMProvider.HUGGINGFACE:
-        endpoint = HuggingFaceEndpoint(
-            repo_id=model_name,
-            provider=settings.hf_provider,
-            huggingfacehub_api_token=settings.hf_api_key,
-            max_new_tokens=max_output_tokens,
-            do_sample=False,
+    if provider is LLMProvider.GEMINI:
+        model: BaseChatModel = ChatGoogleGenerativeAI(
+            model=model_name,
+            api_key=settings.gemini_api_key,
+            max_output_tokens=max_output_tokens,
             timeout=MODEL_TIMEOUT_SECONDS,
-        )
-        model: BaseChatModel = ChatHuggingFace(
-            llm=endpoint,
-            model_id=model_name,
         )
     elif provider is LLMProvider.OPENAI:
         model = ChatOpenAI(
@@ -234,19 +229,19 @@ def _stored_llm_settings(provider: LLMProvider) -> LLMSettings:
         )
 
     values = {
-        "hf_api_key": "",
+        "gemini_api_key": "",
         "openai_api_key": "",
         "anthropic_api_key": "",
         "grok_api_key": "",
     }
     models = {
-        "hf_model": DEFAULT_HF_MODEL,
+        "gemini_model": DEFAULT_GEMINI_MODEL,
         "openai_model": "",
         "anthropic_model": "",
         "grok_model": "",
     }
     key_field, model_field = {
-        LLMProvider.HUGGINGFACE: ("hf_api_key", "hf_model"),
+        LLMProvider.GEMINI: ("gemini_api_key", "gemini_model"),
         LLMProvider.OPENAI: ("openai_api_key", "openai_model"),
         LLMProvider.ANTHROPIC: ("anthropic_api_key", "anthropic_model"),
         LLMProvider.GROK: ("grok_api_key", "grok_model"),
@@ -284,14 +279,13 @@ def _provider_error_detail(
     error: Exception,
 ) -> str:
     message = str(error).casefold()
-    if provider is LLMProvider.HUGGINGFACE and (
-        "sufficient permissions" in message or "403 forbidden" in message
+    if (
+        "authentication" in message
+        or "unauthorized" in message
+        or "api key not valid" in message
+        or "api_key_invalid" in message
+        or "401" in message
     ):
-        return (
-            "Hugging Face rejected its configured API key. Create a fine-grained token "
-            "with permission to make calls to Inference Providers."
-        )
-    if "authentication" in message or "unauthorized" in message or "401" in message:
         return f"{provider.value} rejected its configured API key."
     if "rate limit" in message or "quota" in message or "429" in message:
         return f"{provider.value} rate limit or account quota was exceeded."
@@ -390,10 +384,37 @@ def _invoke_client(
     client: ChatModelClient,
     messages: Sequence[BaseMessage],
     runnable: Any | None = None,
+    response_schema: type[BaseModel] | None = None,
 ) -> tuple[BaseMessage, LLMUsage]:
     try:
         selected_runnable = runnable if runnable is not None else client.model
-        response = selected_runnable.invoke(messages)
+        uses_native_structure = (
+            response_schema is not None
+            and runnable is None
+            and client.provider is LLMProvider.GEMINI
+        )
+        if uses_native_structure:
+            selected_runnable = client.model.with_structured_output(
+                response_schema,
+                include_raw=True,
+            )
+        result = selected_runnable.invoke(messages)
+        parsed = None
+        if uses_native_structure:
+            if not isinstance(result, Mapping):
+                raise TypeError(
+                    "Gemini structured output did not include its raw response."
+                )
+            response = result.get("raw")
+            parsed = result.get("parsed")
+            if not isinstance(response, BaseMessage):
+                raise TypeError(
+                    "Gemini structured output did not include a model message."
+                )
+        else:
+            response = result
+            if not isinstance(response, BaseMessage):
+                raise TypeError("The model did not return a chat message.")
     except Exception as error:
         raise LLMProviderRequestError(
             client.provider,
@@ -405,6 +426,20 @@ def _invoke_client(
         client.provider.value,
         client.model_name,
     )
+    if parsed is not None:
+        if isinstance(parsed, BaseModel):
+            structured_text = parsed.model_dump_json()
+        elif isinstance(parsed, Mapping):
+            structured_text = json.dumps(
+                dict(parsed),
+                ensure_ascii=False,
+                default=str,
+            )
+        else:
+            structured_text = response_schema.model_validate(
+                parsed
+            ).model_dump_json()
+        response = response.model_copy(update={"content": structured_text})
     return response, usage
 
 
@@ -517,13 +552,18 @@ def invoke_chat_model(
     provider: LLMProvider,
     *,
     max_output_tokens: int = MAX_ANSWER_TOKENS,
+    response_schema: type[BaseModel] | None = None,
 ) -> GeneratedText:
-    """Invoke one configured provider and return normalized text safely."""
+    """Invoke one provider and optionally constrain Gemini to a JSON schema."""
     client = get_chat_model_client(
         provider,
         max_output_tokens=max_output_tokens,
     )
-    response, usage = _invoke_client(client, messages)
+    response, usage = _invoke_client(
+        client,
+        messages,
+        response_schema=response_schema,
+    )
 
     text = _message_text(response.content)
     if not text:

@@ -53,7 +53,7 @@ function buildRequest(
   return {
     question: question.trim(),
     ...retrieval,
-    hf: provider === 'huggingface',
+    gemini: provider === 'gemini',
     openai: provider === 'openai',
     anthropic: provider === 'anthropic',
     grok: provider === 'grok',
@@ -292,7 +292,7 @@ export function AskPage({ developerMode }: { developerMode: boolean }) {
   const provider =
     providerOverride && configuredProviders.has(providerOverride)
       ? providerOverride
-      : defaultConfiguredProvider ?? 'huggingface'
+      : defaultConfiguredProvider ?? 'gemini'
 
   const answerMutation = useMutation({
     mutationFn: async (request: AnswerRequest) => {
@@ -461,7 +461,7 @@ export function AskPage({ developerMode }: { developerMode: boolean }) {
                   <span>Answer model</span>
                   <small>Choose one provider</small>
                 </div>
-                <i className="cheap-badge">HF default</i>
+                <i className="cheap-badge">Gemini default</i>
               </div>
               <div className="provider-radio-list">
                 {PROVIDERS.map((item) => {

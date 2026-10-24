@@ -16,7 +16,7 @@ estimated model cost.
 - LLM-directed knowledge search that skips retrieval for general questions
 - Query rewriting, reranking, and source diversification
 - Grounded answers with retrieved sources
-- Hugging Face, OpenAI, Anthropic, and xAI Grok support
+- Google Gemini, OpenAI, Anthropic, and xAI Grok support
 - Encrypted API-key storage with automatic expiry
 - End-to-end RAG evaluation and provider comparison
 - Token usage, approximate cost, and latency reporting
@@ -182,7 +182,7 @@ Open `http://localhost:5173`.
 ### Configure a model
 
 1. Open **Settings**.
-2. Select Hugging Face, OpenAI, Anthropic, or Grok.
+2. Select Google Gemini, OpenAI, Anthropic, or Grok.
 3. Enter the exact provider model ID and API key.
 4. Choose an expiry period and save the encrypted credential.
 
@@ -217,12 +217,13 @@ longer while the embedding model downloads.
 
 1. Start the evaluation worker.
 2. Open **Evaluation** in Developer mode.
-3. Select **Generate dataset** and choose how many questions to create per
-   category. The worker derives them from the ingested corpus and preserves the
-   supporting source excerpts as ground-truth evidence.
-4. Review machine-generated ground truth.
-5. Select answer providers, a judge provider, and retrieval settings.
-6. Run the evaluation and review the quality dashboard.
+3. Select **Configure generator** and choose how many questions to create per
+   category.
+4. Select **Generate dataset**. The worker derives questions from the ingested
+   corpus and preserves supporting source excerpts as ground-truth evidence.
+5. Review machine-generated ground truth.
+6. Select answer providers, a judge provider, and retrieval settings.
+7. Run the evaluation and review the quality dashboard.
 
 Evaluation includes retrieval metrics, correctness, groundedness, completeness,
 relevance, citation quality, abstention behavior, similarity, latency, token

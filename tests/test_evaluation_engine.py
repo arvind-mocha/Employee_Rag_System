@@ -20,6 +20,7 @@ from app.evaluation.models import (
     EvaluationCategory,
     GroundTruthRecord,
     GroundTruthStatus,
+    QuestionGenerationDraft,
     RetrievalConfiguration,
 )
 from app.ingestion.chunker import DocumentChunk
@@ -162,6 +163,10 @@ class GroundTruthGenerationTests(unittest.TestCase):
             QUESTION_GENERATION_BASE_OUTPUT_TOKENS
             + QUESTION_GENERATION_CATEGORY_BATCH_SIZE
             * QUESTION_GENERATION_OUTPUT_TOKENS_PER_QUESTION,
+        )
+        self.assertIs(
+            first_call.kwargs["response_schema"],
+            QuestionGenerationDraft,
         )
 
     def test_rejects_generation_without_ingested_chunks(self) -> None:

@@ -9,9 +9,9 @@ from app.api.schemas.retrieval import RetrievalRequest, RetrievedChunkResponse
 class AnswerRequest(RetrievalRequest):
     """Question, retrieval controls, and one optional LLM provider switch."""
 
-    hf: bool = Field(
+    gemini: bool = Field(
         default=False,
-        description="Use Hugging Face; this is also the default provider.",
+        description="Use Google Gemini; this is also the default provider.",
     )
     openai: bool = Field(default=False, description="Use the OpenAI provider.")
     anthropic: bool = Field(
@@ -22,7 +22,9 @@ class AnswerRequest(RetrievalRequest):
 
     @model_validator(mode="after")
     def allow_at_most_one_provider(self) -> "AnswerRequest":
-        selected_count = sum((self.hf, self.openai, self.anthropic, self.grok))
+        selected_count = sum(
+            (self.gemini, self.openai, self.anthropic, self.grok)
+        )
         if selected_count > 1:
             raise ValueError("only one LLM provider can be enabled")
         return self

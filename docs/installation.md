@@ -14,7 +14,7 @@ file.
   download
 - An API key for at least one supported LLM provider
 
-Supported providers are Hugging Face, OpenAI, Anthropic, and xAI Grok.
+Supported providers are Google Gemini, OpenAI, Anthropic, and xAI Grok.
 
 ## Default local services
 

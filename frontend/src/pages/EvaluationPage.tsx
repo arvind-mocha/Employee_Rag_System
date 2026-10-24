@@ -1,4 +1,4 @@
-import { FormEvent, useMemo, useState } from 'react'
+import { FormEvent, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import {
   AlertTriangle,
@@ -501,9 +501,10 @@ function EvaluationDashboard({ run }: { run: EvaluationRun }) {
 }
 
 export function EvaluationPage() {
+  const datasetBuilderRef = useRef<HTMLElement>(null)
   const [datasetName, setDatasetName] = useState(readStoredDatasetName)
   const [answerProviders, setAnswerProviders] = useState<Provider[]>([
-    'huggingface',
+    'gemini',
     'openai',
   ])
   const [judgeProvider, setJudgeProvider] = useState<Provider>('openai')
@@ -516,7 +517,7 @@ export function EvaluationPage() {
   const [showDatasetBuilder, setShowDatasetBuilder] = useState(false)
   const [questionsPerCategory, setQuestionsPerCategory] = useState(1)
   const [referenceProvider, setReferenceProvider] =
-    useState<Provider>('huggingface')
+    useState<Provider>('gemini')
   const [overwrite, setOverwrite] = useState(false)
   const [datasetJob, setDatasetJob] = useState<EvaluationJobAccepted | null>(
     () => readStoredJob(DATASET_JOB_STORAGE_KEY),
@@ -594,6 +595,20 @@ export function EvaluationPage() {
     })
   }
 
+  const toggleDatasetBuilder = () => {
+    if (showDatasetBuilder) {
+      setShowDatasetBuilder(false)
+      return
+    }
+    setShowDatasetBuilder(true)
+    window.requestAnimationFrame(() => {
+      datasetBuilderRef.current?.scrollIntoView({
+        behavior: 'smooth',
+        block: 'start',
+      })
+    })
+  }
+
   const activeEvaluation = evaluationMutation.isPending || Boolean(
     evaluationStatus.data && !TERMINAL_JOB_STATES.has(evaluationStatus.data.status),
   )
@@ -635,10 +650,10 @@ export function EvaluationPage() {
               <button
                 type="button"
                 className="text-button"
-                onClick={() => setShowDatasetBuilder((value) => !value)}
+                onClick={toggleDatasetBuilder}
               >
                 {showDatasetBuilder ? <X size={15} /> : <Sparkles size={15} />}
-                {showDatasetBuilder ? 'Close generator' : 'Generate dataset'}
+                {showDatasetBuilder ? 'Close generator' : 'Configure generator'}
               </button>
             </div>
             <label className="field-label" htmlFor="dataset-name">
@@ -830,7 +845,7 @@ export function EvaluationPage() {
       </form>
 
       {showDatasetBuilder && (
-        <section className="dataset-builder">
+        <section className="dataset-builder" ref={datasetBuilderRef}>
           <div className="dataset-builder-heading">
             <div className="builder-icon">
               <FilePlus2 size={20} />
@@ -870,7 +885,7 @@ export function EvaluationPage() {
               <small>
                 {questionsPerCategory * CATEGORIES.length} questions will be
                 generated from stored ingestion chunks. No generation runs until
-                you select Generate ground truth.
+                you select Generate dataset.
               </small>
             </div>
             <div className="builder-options">
@@ -932,7 +947,7 @@ export function EvaluationPage() {
                 }
               >
                 {activeDataset ? <i className="spinner dark" /> : <FilePlus2 size={16} />}
-                {activeDataset ? 'Generating dataset' : 'Generate ground truth'}
+                {activeDataset ? 'Generating dataset' : 'Generate dataset'}
               </button>
             </div>
           </form>

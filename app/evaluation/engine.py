@@ -294,6 +294,7 @@ def generate_evaluation_questions(
             ),
             reference_provider,
             max_output_tokens=max_output_tokens,
+            response_schema=QuestionGenerationDraft,
         )
         draft = _question_generation_draft(generated.text)
         counts = Counter(question.category for question in draft.questions)
@@ -432,6 +433,7 @@ def generate_ground_truth_records(
         generated = invoke_chat_model(
             build_reference_messages(question, chunks),
             reference_provider,
+            response_schema=ReferenceDraft,
         )
         draft = _reference_draft(generated.text)
         evidence_numbers = list(dict.fromkeys(draft.relevant_evidence_numbers))
@@ -673,6 +675,7 @@ def evaluate_record(
         judged = invoke_chat_model(
             build_judge_messages(record, generated_answer.answer, chunks),
             judge_provider,
+            response_schema=JudgeDraft,
         )
         judge = _judge_draft(judged.text)
     except Exception as error:

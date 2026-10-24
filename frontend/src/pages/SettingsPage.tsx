@@ -25,6 +25,10 @@ const EXPIRY_OPTIONS = [
   { hours: 8_760, label: '1 year' },
 ]
 
+const DEFAULT_MODEL_NAMES: Partial<Record<Provider, string>> = {
+  gemini: 'gemini-3.5-flash-lite',
+}
+
 function dateTime(value: string): string {
   return new Intl.DateTimeFormat(undefined, {
     dateStyle: 'medium',
@@ -43,7 +47,7 @@ function timeRemaining(value: string): string {
 
 export function SettingsPage() {
   const queryClient = useQueryClient()
-  const [provider, setProvider] = useState<Provider>('huggingface')
+  const [provider, setProvider] = useState<Provider>('gemini')
   const [modelNames, setModelNames] = useState<Partial<Record<Provider, string>>>({})
   const [apiKey, setApiKey] = useState('')
   const [expiresInHours, setExpiresInHours] = useState(24)
@@ -64,7 +68,10 @@ export function SettingsPage() {
     [credentials, provider],
   )
   const modelName =
-    modelNames[provider] ?? selectedCredential?.model_name ?? ''
+    modelNames[provider] ??
+    selectedCredential?.model_name ??
+    DEFAULT_MODEL_NAMES[provider] ??
+    ''
 
   const saveMutation = useMutation({
     mutationFn: api.saveProviderCredential,
