@@ -87,9 +87,10 @@ Employee_Rag_System/
 ## Ingestion flow
 
 1. The frontend sends a multipart ZIP to `POST /api/v1/data/upload`.
-2. The API checks compressed size, member paths, file types, extracted size,
-   file count, duplicate names, and conflicts with existing data.
-3. Supported files are flattened and routed to `data/` or `structured_data/`.
+2. The API checks compressed size, member paths, extracted size, and file count.
+3. Unsupported files are ignored. Supported files are flattened, collisions
+   receive a numeric suffix, and files are routed to `data/` or
+   `structured_data/`.
 4. A successful upload invalidates the previous ingestion completion state.
 5. `POST /api/v1/ingestion/start` acquires a Redis-backed distributed lock.
 6. Unstructured documents are extracted and normalized into temporary Markdown.
@@ -101,7 +102,13 @@ Employee_Rag_System/
 
 Only one ingestion run can hold the distributed lock at a time. The lock has a
 safety timeout, while the latest result is persistent because it controls chat
-readiness.
+readiness. Later ZIP uploads add files and re-run ingestion over the combined
+source set; existing files are preserved and incoming name collisions are
+stored with a numeric suffix rather than replacing them.
+
+The vector erase operation acquires the same distributed lock, drops only the
+configured vector table, clears retrieval caches, and resets readiness to
+`idle`. It does not delete source files, evaluation data, or credentials.
 
 ## Retrieval and answer flow
 
@@ -134,7 +141,9 @@ ingest chat messages. Each answer request is processed independently.
 
 ## Evaluation flow
 
-1. A developer uploads a JSONL dataset or requests ground-truth generation.
+1. A developer requests ground-truth generation. The worker derives balanced
+   questions from artifacts retained by ingestion; JSONL persistence is internal
+   to the application.
 2. Asynchronous requests are placed on the Redis evaluation queue.
 3. The RQ worker retrieves evidence, calls the selected answer providers, and
    calls the chosen judge provider.
@@ -154,7 +163,7 @@ answer requests.
 | `data/` | Uploaded unstructured source files | Local filesystem; ignored by Git |
 | `structured_data/` | Uploaded structured source files | Local filesystem; ignored by Git |
 | `temp_data/` | Cleaned intermediate Markdown | Local filesystem; ignored by Git |
-| `evaluation_data/` | Generated or uploaded evaluation JSONL | Local filesystem; ignored by Git |
+| `evaluation_data/` | Generated evaluation JSONL | Local filesystem; ignored by Git |
 | `.secrets/` | Local credential encryption key | Local filesystem; ignored by Git |
 
 For container or multi-instance deployment, local data paths must be backed by

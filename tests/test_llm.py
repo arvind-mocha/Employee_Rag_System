@@ -114,7 +114,11 @@ class ChatModelFactoryTests(unittest.TestCase):
             openai_model="configured-openai-model",
         )
 
-        client = create_chat_model_client(LLMProvider.OPENAI, settings)
+        client = create_chat_model_client(
+            LLMProvider.OPENAI,
+            settings,
+            max_output_tokens=2_048,
+        )
 
         self.assertIs(client.model, chat_class.return_value)
         self.assertEqual(
@@ -124,6 +128,10 @@ class ChatModelFactoryTests(unittest.TestCase):
         self.assertEqual(
             chat_class.call_args.kwargs["api_key"],
             "openai-secret",
+        )
+        self.assertEqual(
+            chat_class.call_args.kwargs["max_completion_tokens"],
+            2_048,
         )
 
     @patch("app.api.llm.ChatAnthropic")

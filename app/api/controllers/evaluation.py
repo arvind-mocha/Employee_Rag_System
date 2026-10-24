@@ -8,8 +8,9 @@ from fastapi import File, Form, HTTPException, UploadFile, status
 
 from app.api import config
 from app.api.llm import LLMConfigurationError, LLMProviderRequestError
-from app.api.llm_usage import summarize_llm_usage
+from app.api.llm_usage import LLMUsage, summarize_llm_usage
 from app.api.schemas.evaluation import (
+    DeleteEvaluationDatasetResponse,
     GenerateEvaluationDatasetRequest,
     GenerateEvaluationDatasetResponse,
     RunEvaluationRequest,
@@ -19,6 +20,7 @@ from app.api.schemas.evaluation import (
 from app.evaluation.dataset import (
     EvaluationDatasetError,
     dataset_sha256,
+    dataset_path,
     parse_dataset_jsonl,
     read_dataset,
     validate_dataset_name,
@@ -26,6 +28,7 @@ from app.evaluation.dataset import (
 )
 from app.evaluation.engine import (
     EvaluationOutputError,
+    generate_evaluation_questions,
     generate_ground_truth_records,
     run_evaluation,
 )
@@ -37,8 +40,36 @@ logger = logging.getLogger(__name__)
 
 def _dataset_request_error(error: Exception) -> HTTPException:
     return HTTPException(
-        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         detail=str(error),
+    )
+
+
+def delete_evaluation_dataset(
+    dataset_name: str,
+) -> DeleteEvaluationDatasetResponse:
+    """Delete one explicitly named evaluation dataset."""
+    try:
+        normalized_name = validate_dataset_name(dataset_name)
+        source = dataset_path(normalized_name)
+        source.unlink()
+    except FileNotFoundError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"evaluation dataset not found: {source.name}",
+        ) from error
+    except EvaluationDatasetError as error:
+        raise _dataset_request_error(error) from error
+    except OSError as error:
+        logger.exception("Evaluation dataset deletion failed")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="The evaluation dataset could not be deleted.",
+        ) from error
+
+    return DeleteEvaluationDatasetResponse(
+        dataset_name=normalized_name,
+        message=f"Evaluation dataset {source.name} was deleted.",
     )
 
 
@@ -48,10 +79,30 @@ def generate_evaluation_dataset(
     """Generate a JSONL ground-truth snapshot only when explicitly called."""
     try:
         dataset_name = validate_dataset_name(request.dataset_name)
+        generation_usages: list[LLMUsage | None] = []
+        category_hints = None
+        evidence_hints = None
+        questions = request.questions
+        if questions is None:
+            (
+                generated_questions,
+                generation_usages,
+                evidence_hints,
+            ) = generate_evaluation_questions(
+                request.reference_provider,
+                request.questions_per_category,
+            )
+            questions = [item.question for item in generated_questions]
+            category_hints = {
+                item.question.casefold(): item.category
+                for item in generated_questions
+            }
         records = generate_ground_truth_records(
-            request.questions,
+            questions,
             request.reference_provider,
             request.retrieval_configuration(),
+            category_hints=category_hints,
+            evidence_hints=evidence_hints,
         )
         destination = write_dataset(
             dataset_name,
@@ -96,7 +147,10 @@ def generate_evaluation_dataset(
         reference_provider=records[0].reference_provider,
         reference_model=records[0].reference_model,
         usage=summarize_llm_usage(
-            record.reference_usage for record in records
+            [
+                *generation_usages,
+                *(record.reference_usage for record in records),
+            ]
         ),
         review_required=True,
     )

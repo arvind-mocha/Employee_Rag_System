@@ -69,6 +69,9 @@ DATA_DIRECTORY = PROJECT_ROOT / "data"
 STRUCTURED_DATA_DIRECTORY = PROJECT_ROOT / "structured_data"
 TEMP_DATA_DIRECTORY = PROJECT_ROOT / "temp_data"
 EVALUATION_DATA_DIRECTORY = PROJECT_ROOT / "evaluation_data"
+EVALUATION_CORPUS_SNAPSHOT_FILE = (
+    TEMP_DATA_DIRECTORY / ".evaluation_corpus.json"
+)
 
 STRUCTURED_EXTENSIONS = frozenset({".csv", ".json", ".xlsx"})
 UNSTRUCTURED_EXTENSIONS = frozenset(

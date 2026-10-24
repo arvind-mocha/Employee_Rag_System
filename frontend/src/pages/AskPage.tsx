@@ -324,6 +324,7 @@ export function AskPage({ developerMode }: { developerMode: boolean }) {
     if (!canSubmit) return
     const request = buildRequest(question, provider, retrieval)
     setLastRequest(request)
+    setQuestion('')
     answerMutation.mutate(request)
   }
 

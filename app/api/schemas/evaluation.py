@@ -35,13 +35,23 @@ class EvaluationRetrievalRequest(BaseModel):
 
 class GenerateEvaluationDatasetRequest(EvaluationRetrievalRequest):
     dataset_name: str
-    questions: list[str] = Field(min_length=1, max_length=100)
+    questions: list[str] | None = Field(
+        default=None,
+        min_length=1,
+        max_length=100,
+    )
+    questions_per_category: int = Field(default=1, ge=1, le=5)
     reference_provider: LLMProvider
     overwrite: bool = False
 
     @field_validator("questions")
     @classmethod
-    def validate_questions(cls, questions: list[str]) -> list[str]:
+    def validate_questions(
+        cls,
+        questions: list[str] | None,
+    ) -> list[str] | None:
+        if questions is None:
+            return None
         normalized = [" ".join(question.split()) for question in questions]
         if any(not question for question in normalized):
             raise ValueError("questions must not contain blank values")
@@ -72,6 +82,11 @@ class UploadEvaluationDatasetResponse(BaseModel):
     dataset_sha256: str
     record_count: int
     review_required: bool
+
+
+class DeleteEvaluationDatasetResponse(BaseModel):
+    dataset_name: str
+    message: str
 
 
 class RunEvaluationRequest(EvaluationRetrievalRequest):

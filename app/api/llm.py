@@ -160,8 +160,13 @@ def select_provider(
 def create_chat_model_client(
     provider: LLMProvider,
     settings: LLMSettings | None = None,
+    *,
+    max_output_tokens: int = MAX_ANSWER_TOKENS,
 ) -> ChatModelClient:
     """Create the LangChain chat model configured for one provider."""
+    if max_output_tokens < 1:
+        raise ValueError("max_output_tokens must be at least 1")
+
     settings = settings or _stored_llm_settings(provider)
     settings.validate_provider(provider)
     model_name = settings.model_for(provider)
@@ -171,7 +176,7 @@ def create_chat_model_client(
             repo_id=model_name,
             provider=settings.hf_provider,
             huggingfacehub_api_token=settings.hf_api_key,
-            max_new_tokens=MAX_ANSWER_TOKENS,
+            max_new_tokens=max_output_tokens,
             do_sample=False,
             timeout=MODEL_TIMEOUT_SECONDS,
         )
@@ -183,14 +188,14 @@ def create_chat_model_client(
         model = ChatOpenAI(
             model=model_name,
             api_key=settings.openai_api_key,
-            max_completion_tokens=MAX_ANSWER_TOKENS,
+            max_completion_tokens=max_output_tokens,
             timeout=MODEL_TIMEOUT_SECONDS,
         )
     elif provider is LLMProvider.ANTHROPIC:
         model = ChatAnthropic(
             model_name=model_name,
             api_key=settings.anthropic_api_key,
-            max_tokens_to_sample=MAX_ANSWER_TOKENS,
+            max_tokens_to_sample=max_output_tokens,
             timeout=MODEL_TIMEOUT_SECONDS,
         )
     else:
@@ -198,7 +203,7 @@ def create_chat_model_client(
             model=model_name,
             api_key=settings.grok_api_key,
             base_url=settings.grok_base_url,
-            max_completion_tokens=MAX_ANSWER_TOKENS,
+            max_completion_tokens=max_output_tokens,
             timeout=MODEL_TIMEOUT_SECONDS,
             use_responses_api=False,
         )
@@ -206,9 +211,16 @@ def create_chat_model_client(
     return ChatModelClient(provider, model_name, model)
 
 
-def get_chat_model_client(provider: LLMProvider) -> ChatModelClient:
+def get_chat_model_client(
+    provider: LLMProvider,
+    *,
+    max_output_tokens: int = MAX_ANSWER_TOKENS,
+) -> ChatModelClient:
     """Build a client from the active, unexpired database credential."""
-    return create_chat_model_client(provider)
+    return create_chat_model_client(
+        provider,
+        max_output_tokens=max_output_tokens,
+    )
 
 
 def _stored_llm_settings(provider: LLMProvider) -> LLMSettings:
@@ -503,9 +515,14 @@ def generate_tool_driven_answer(
 def invoke_chat_model(
     messages: Sequence[BaseMessage],
     provider: LLMProvider,
+    *,
+    max_output_tokens: int = MAX_ANSWER_TOKENS,
 ) -> GeneratedText:
     """Invoke one configured provider and return normalized text safely."""
-    client = get_chat_model_client(provider)
+    client = get_chat_model_client(
+        provider,
+        max_output_tokens=max_output_tokens,
+    )
     response, usage = _invoke_client(client, messages)
 
     text = _message_text(response.content)

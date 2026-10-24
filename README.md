@@ -33,7 +33,8 @@ Files must be uploaded inside a `.zip` archive.
 | Structured | `.csv`, `.json`, `.xlsx` | Record and worksheet parsing followed by structured chunking |
 
 Default limits are 50 MB per ZIP, 200 MB after extraction, and 1,000 files.
-Existing filenames are never silently overwritten.
+Unsupported entries are ignored. Existing filenames are preserved and new
+duplicates receive a numeric suffix such as `handbook_1.pdf`.
 
 ## Architecture
 
@@ -120,13 +121,33 @@ From the repository root:
 
 ```bash
 uv sync
+npm --prefix frontend install
 docker compose up -d
 docker compose ps
 ```
 
 Wait for PostgreSQL/PGVector and Redis to report healthy.
 
-### 2. Start the API
+### 2. Start the frontend, API, and worker
+
+From the repository root, start all three development processes with one
+command:
+
+```bash
+npx concurrently --kill-others \
+  "uv run uvicorn app.api.main:app --reload" \
+  "uv run employee-rag-worker" \
+  "npm --prefix frontend run dev"
+```
+
+The first run may ask permission to download `concurrently`. Press `Ctrl+C` to
+stop all three processes. Open the frontend at `http://localhost:5173`; the API
+is available at `http://localhost:8000/api/v1`, with interactive documentation
+at `http://localhost:8000/docs`.
+
+To run each process in a separate terminal instead, use the commands below.
+
+### Start the API separately
 
 ```bash
 uv run uvicorn app.api.main:app --reload
@@ -135,7 +156,7 @@ uv run uvicorn app.api.main:app --reload
 - API: `http://localhost:8000/api/v1`
 - API documentation: `http://localhost:8000/docs`
 
-### 3. Start the evaluation worker
+### Start the evaluation worker separately
 
 In another terminal:
 
@@ -146,14 +167,12 @@ uv run employee-rag-worker
 The worker is required for asynchronous evaluation operations, but not for
 normal chat or ingestion.
 
-### 4. Start the frontend
+### Start the frontend separately
 
 In another terminal:
 
 ```bash
-cd frontend
-npm install
-npm run dev
+npm --prefix frontend run dev
 ```
 
 Open `http://localhost:5173`.
@@ -174,10 +193,16 @@ Open `http://localhost:5173`.
 3. Select **Upload ZIP**.
 4. Select **Start ingestion**.
 5. Wait for **Knowledge base ready**, then open chat.
+6. To expand the dataset later, select **Add more documents**, upload a ZIP
+   containing supported files, and start ingestion again. Duplicate filenames
+   are stored with a numeric suffix.
 
 If ingestion has not completed, the home route displays data setup instead of
 chat. Uploading more data locks chat again until the next successful ingestion.
-The first run may take longer while the embedding model downloads.
+File-level replacement is intentionally not supported yet. **Erase vector
+database** clears indexed chunks but preserves uploaded source files and
+provider credentials; run ingestion again to rebuild it. The first run may take
+longer while the embedding model downloads.
 
 ### Ask questions
 
@@ -192,14 +217,16 @@ The first run may take longer while the embedding model downloads.
 
 1. Start the evaluation worker.
 2. Open **Evaluation** in Developer mode.
-3. Upload a validated JSONL dataset or generate one from a list of questions.
+3. Select **Generate dataset** and choose how many questions to create per
+   category. The worker derives them from the ingested corpus and preserves the
+   supporting source excerpts as ground-truth evidence.
 4. Review machine-generated ground truth.
 5. Select answer providers, a judge provider, and retrieval settings.
 6. Run the evaluation and review the quality dashboard.
 
 Evaluation includes retrieval metrics, correctness, groundedness, completeness,
 relevance, citation quality, abstention behavior, similarity, latency, token
-usage, and estimated cost. Evaluation datasets are limited to 10 MB and 100
+usage, and estimated cost. Generated evaluation datasets are limited to 100
 records by default.
 
 ## Security and deployment

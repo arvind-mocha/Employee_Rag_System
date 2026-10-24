@@ -65,6 +65,8 @@ class DataUploadTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 201)
         self.assertEqual(response.json()["total_files"], 4)
+        self.assertEqual(response.json()["ignored_files"], [])
+        self.assertEqual(response.json()["renamed_files"], {})
         self.assertTrue((self.data_directory / "handbook.pdf").is_file())
         self.assertTrue((self.data_directory / "readme.md").is_file())
         self.assertTrue((self.structured_data_directory / "list.csv").is_file())
@@ -81,7 +83,7 @@ class DataUploadTests(unittest.TestCase):
         self.assertFalse(self.data_directory.exists())
         self.ingestion_runner.mark_data_changed.assert_not_called()
 
-    def test_rejects_an_unsupported_file_type(self) -> None:
+    def test_rejects_an_archive_without_supported_files(self) -> None:
         response = self.client.post(
             "/api/v1/data/upload",
             files={
@@ -93,8 +95,33 @@ class DataUploadTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(response.status_code, 415)
+        self.assertEqual(response.status_code, 400)
         self.assertFalse(self.data_directory.exists())
+        self.ingestion_runner.mark_data_changed.assert_not_called()
+
+    def test_ignores_unsupported_files_in_a_mixed_archive(self) -> None:
+        response = self.client.post(
+            "/api/v1/data/upload",
+            files={
+                "zip_file": (
+                    "source-data.zip",
+                    make_zip(
+                        {
+                            "documents/handbook.pdf": b"pdf content",
+                            "images/logo.png": b"image",
+                        }
+                    ),
+                    "application/zip",
+                )
+            },
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["total_files"], 1)
+        self.assertEqual(response.json()["ignored_files"], ["images/logo.png"])
+        self.assertTrue((self.data_directory / "handbook.pdf").is_file())
+        self.assertFalse((self.data_directory / "logo.png").exists())
+        self.ingestion_runner.mark_data_changed.assert_called_once_with()
 
     def test_does_not_overwrite_an_existing_file(self) -> None:
         self.data_directory.mkdir()
@@ -112,10 +139,18 @@ class DataUploadTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.status_code, 201)
         self.assertEqual(existing_file.read_bytes(), b"original")
+        self.assertEqual(
+            (self.data_directory / "handbook_1.pdf").read_bytes(),
+            b"replacement",
+        )
+        self.assertEqual(
+            response.json()["renamed_files"],
+            {"handbook.pdf": "handbook_1.pdf"},
+        )
 
-    def test_rejects_duplicate_names_after_flattening(self) -> None:
+    def test_renames_duplicate_names_after_flattening(self) -> None:
         response = self.client.post(
             "/api/v1/data/upload",
             files={
@@ -132,7 +167,55 @@ class DataUploadTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(
+            (self.data_directory / "profile.txt").read_bytes(),
+            b"first",
+        )
+        self.assertEqual(
+            (self.data_directory / "profile_1.txt").read_bytes(),
+            b"second",
+        )
+        self.assertEqual(
+            response.json()["renamed_files"],
+            {"team-b/profile.txt": "profile_1.txt"},
+        )
+
+    def test_uses_the_next_available_numeric_suffix(self) -> None:
+        self.data_directory.mkdir()
+        (self.data_directory / "handbook.pdf").write_bytes(b"original")
+        (self.data_directory / "handbook_1.pdf").write_bytes(b"first duplicate")
+
+        response = self.client.post(
+            "/api/v1/data/upload",
+            files={
+                "zip_file": (
+                    "source-data.zip",
+                    make_zip({"handbook.pdf": b"second duplicate"}),
+                    "application/zip",
+                )
+            },
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(
+            (self.data_directory / "handbook_2.pdf").read_bytes(),
+            b"second duplicate",
+        )
+
+    def test_rejects_an_unsafe_path_even_when_its_type_is_unsupported(self) -> None:
+        response = self.client.post(
+            "/api/v1/data/upload",
+            files={
+                "zip_file": (
+                    "source-data.zip",
+                    make_zip({"../image.png": b"image", "handbook.pdf": b"pdf"}),
+                    "application/zip",
+                )
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
         self.assertFalse(self.data_directory.exists())
 
 

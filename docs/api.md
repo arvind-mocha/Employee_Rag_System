@@ -13,6 +13,7 @@ available at `http://localhost:8000`, with interactive OpenAPI documentation at
 | `POST` | `/data/upload` | `201` | Validate, extract, classify, and store an uploaded ZIP |
 | `POST` | `/ingestion/start` | `202` | Reserve and start one ingestion run |
 | `GET` | `/ingestion/status` | `200` | Return the latest ingestion state and timestamps |
+| `DELETE` | `/data/vector-database` | `200` | Erase indexed vectors while preserving source files and credentials |
 
 Ingestion states are `idle`, `pending`, `running`, `completed`, and `failed`.
 
@@ -48,7 +49,8 @@ Provider names are `huggingface`, `openai`, `anthropic`, and `grok`.
 | Method | Endpoint | Success | Purpose |
 | --- | --- | --- | --- |
 | `POST` | `/evaluations/datasets/generate` | `201` | Generate ground truth synchronously |
-| `POST` | `/evaluations/datasets/upload` | `201` | Validate and save an evaluation JSONL file |
+| `POST` | `/evaluations/datasets/upload` | `201` | Administrative compatibility endpoint for validated JSONL |
+| `DELETE` | `/evaluations/datasets/{dataset_name}` | `200` | Delete one named evaluation dataset |
 | `POST` | `/evaluations/run` | `200` | Run an evaluation synchronously |
 | `POST` | `/evaluations/datasets/generate/async` | `202` | Queue ground-truth generation |
 | `POST` | `/evaluations/run/async` | `202` | Queue an evaluation run |
@@ -66,7 +68,12 @@ curl -X POST http://localhost:8000/api/v1/data/upload \
   -F 'zip_file=@company-data.zip;type=application/zip'
 ```
 
-The response lists the structured and unstructured filenames that were stored.
+The response lists the structured and unstructured filenames that were stored,
+plus `ignored_files` and `renamed_files`. Unsupported members are ignored when
+at least one supported file remains. Additional ZIPs are additive; a filename
+already present in either source-data directory is preserved and the incoming
+file receives a numeric suffix such as `_1`. File-level replacement is not
+supported.
 
 ### Start and poll ingestion
 
@@ -76,6 +83,17 @@ curl http://localhost:8000/api/v1/ingestion/status
 ```
 
 Starting a second concurrent run returns `409 Conflict`.
+
+### Erase indexed vectors
+
+```bash
+curl -X DELETE http://localhost:8000/api/v1/data/vector-database
+```
+
+This operation shares the ingestion lock, drops only the configured vector
+table, and resets readiness to `idle`. Uploaded source files, evaluation files,
+and encrypted provider credentials are preserved. Run ingestion again to
+rebuild the index. A concurrent ingestion returns `409 Conflict`.
 
 ### Retrieve chunks
 
@@ -137,7 +155,7 @@ curl -X POST \
   -H 'Content-Type: application/json' \
   -d '{
     "dataset_name": "employee-policies",
-    "questions": ["How many vacation days do employees receive?"],
+    "questions_per_category": 1,
     "reference_provider": "openai",
     "semantic_search": true,
     "keyword_search": true,
@@ -148,8 +166,10 @@ curl -X POST \
   }'
 ```
 
-The response contains a `job_id` and `status_url`. Poll the returned URL until
-the job completes or fails.
+The worker derives questions from artifacts retained by the latest ingestion.
+`questions_per_category` accepts 1 through 5, producing 9 through 45 balanced
+questions. The response contains a `job_id` and `status_url`; poll it until the
+job completes or fails.
 
 ### Queue an evaluation run
 
@@ -176,7 +196,8 @@ curl -X POST http://localhost:8000/api/v1/evaluations/run/async \
 | Extracted source data | 200 MB total |
 | Files in a ZIP | 1,000 |
 | Evaluation upload | 10 MB |
-| Evaluation records or generated questions | 100 |
+| Automatically generated questions | 45 total; 1–5 for each of 9 categories |
+| Manually supplied evaluation records | 100 |
 | Question length | 2,000 characters |
 | Answer providers in one evaluation | 4 |
 

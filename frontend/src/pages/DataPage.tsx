@@ -7,11 +7,13 @@ import {
   CheckCircle2,
   DatabaseZap,
   FileArchive,
+  FolderPlus,
   FileSpreadsheet,
   FileText,
   LoaderCircle,
   Play,
   RefreshCw,
+  Trash2,
   UploadCloud,
 } from 'lucide-react'
 import {
@@ -60,13 +62,15 @@ function readableTime(value: string | null): string | null {
 }
 
 function UploadedFiles({ upload }: { upload: DataUploadResponse }) {
+  const renamedFiles = Object.entries(upload.renamed_files)
+
   return (
     <div className="data-upload-result">
       <div className="data-result-heading">
         <CheckCircle2 size={18} />
         <span>
           <strong>{upload.total_files} files uploaded</strong>
-          <small>Files are stored locally and ready for ingestion.</small>
+          <small>Supported files are stored locally and ready for ingestion.</small>
         </span>
       </div>
       <div className="data-file-groups">
@@ -85,6 +89,38 @@ function UploadedFiles({ upload }: { upload: DataUploadResponse }) {
           <small>{upload.structured_files.join(', ') || 'None'}</small>
         </div>
       </div>
+      {(renamedFiles.length > 0 || upload.ignored_files.length > 0) && (
+        <div className="data-upload-decisions">
+          {renamedFiles.length > 0 && (
+            <div>
+              <span>
+                <RefreshCw size={13} /> Renamed duplicates
+              </span>
+              <ul>
+                {renamedFiles.map(([original, stored]) => (
+                  <li key={`${original}-${stored}`}>
+                    <code>{original}</code> → <code>{stored}</code>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {upload.ignored_files.length > 0 && (
+            <div className="ignored">
+              <span>
+                <AlertCircle size={13} /> Ignored unsupported files
+              </span>
+              <ul>
+                {upload.ignored_files.map((filename) => (
+                  <li key={filename}>
+                    <code>{filename}</code>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   )
 }
@@ -93,6 +129,7 @@ export function DataPage() {
   const queryClient = useQueryClient()
   const fileInput = useRef<HTMLInputElement>(null)
   const [zipFile, setZipFile] = useState<File | null>(null)
+  const [confirmErase, setConfirmErase] = useState(false)
   const statusQuery = useIngestionStatus()
   const status = statusQuery.data?.status ?? 'idle'
   const active = status === 'pending' || status === 'running'
@@ -128,6 +165,24 @@ export function DataPage() {
     },
   })
 
+  const eraseMutation = useMutation({
+    mutationFn: api.eraseVectorDatabase,
+    onSuccess: async () => {
+      setConfirmErase(false)
+      uploadMutation.reset()
+      const idle: IngestionStatusResponse = {
+        status: 'idle',
+        error: null,
+        started_at: null,
+        finished_at: null,
+      }
+      queryClient.setQueryData(INGESTION_STATUS_QUERY_KEY, idle)
+      await queryClient.invalidateQueries({
+        queryKey: INGESTION_STATUS_QUERY_KEY,
+      })
+    },
+  })
+
   const upload = (event: FormEvent) => {
     event.preventDefault()
     if (zipFile) uploadMutation.mutate(zipFile)
@@ -135,7 +190,16 @@ export function DataPage() {
 
   const chooseFile = (file: File | undefined) => {
     uploadMutation.reset()
+    eraseMutation.reset()
+    setConfirmErase(false)
     setZipFile(file ?? null)
+  }
+
+  const chooseAdditionalDocuments = () => {
+    uploadMutation.reset()
+    eraseMutation.reset()
+    setConfirmErase(false)
+    fileInput.current?.click()
   }
 
   const statusCopy = STATUS_COPY[status]
@@ -150,8 +214,8 @@ export function DataPage() {
           </span>
           <h1>Prepare your company knowledge</h1>
           <p>
-            Upload one ZIP of supported employee documents, then start ingestion.
-            Chat stays locked until the index is built successfully.
+            Upload a ZIP of supported employee documents, add more ZIPs later,
+            then start ingestion. Existing filenames are never overwritten.
           </p>
         </div>
         <div className={`data-readiness-badge ${status}`}>
@@ -186,21 +250,133 @@ export function DataPage() {
         </div>
       )}
 
+      <section className="data-management-bar">
+        <div>
+          <strong>Manage knowledge data</strong>
+          <small>
+            Add new files or erase indexed vectors while keeping uploaded source files.
+          </small>
+        </div>
+        <div className="data-management-actions">
+          <button
+            className="secondary-button"
+            type="button"
+            onClick={chooseAdditionalDocuments}
+            disabled={active || uploadMutation.isPending || eraseMutation.isPending}
+          >
+            <FolderPlus size={16} /> Add more documents
+          </button>
+          <button
+            className="data-danger-button"
+            type="button"
+            onClick={() => {
+              eraseMutation.reset()
+              setConfirmErase(true)
+            }}
+            disabled={active || eraseMutation.isPending}
+          >
+            <Trash2 size={16} /> Erase vector database
+          </button>
+        </div>
+      </section>
+
+      {confirmErase && (
+        <div className="data-erase-confirmation" role="alert">
+          <AlertCircle size={19} />
+          <span>
+            <strong>Erase every indexed chunk?</strong>
+            <small>
+              Chat will be locked until ingestion runs again. Uploaded source files
+              and provider credentials will not be deleted.
+            </small>
+          </span>
+          <div>
+            <button
+              className="secondary-button"
+              type="button"
+              onClick={() => setConfirmErase(false)}
+              disabled={eraseMutation.isPending}
+            >
+              Cancel
+            </button>
+            <button
+              className="data-danger-button solid"
+              type="button"
+              onClick={() => eraseMutation.mutate()}
+              disabled={eraseMutation.isPending}
+            >
+              {eraseMutation.isPending ? (
+                <LoaderCircle className="spin" size={16} />
+              ) : (
+                <Trash2 size={16} />
+              )}
+              {eraseMutation.isPending ? 'Erasing vectors' : 'Yes, erase vectors'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {eraseMutation.isError && (
+        <div className="data-alert error" role="alert">
+          <AlertCircle size={18} />
+          <span>
+            <strong>Vector database could not be erased</strong>
+            <small>
+              {eraseMutation.error instanceof Error
+                ? eraseMutation.error.message
+                : 'The erase operation failed.'}
+            </small>
+          </span>
+        </div>
+      )}
+
+      {eraseMutation.isSuccess && (
+        <div className="data-alert success" role="status">
+          <CheckCircle2 size={18} />
+          <span>
+            <strong>Vector database erased</strong>
+            <small>{eraseMutation.data.message}</small>
+          </span>
+        </div>
+      )}
+
       <div className="data-steps">
         <form className="data-step-card" onSubmit={upload}>
           <div className="data-step-heading">
             <span>01</span>
             <div>
-              <h2>Upload source files</h2>
-              <p>Use one ZIP containing documents or structured data.</p>
+              <h2>{status === 'completed' ? 'Add more documents' : 'Upload source files'}</h2>
+              <p>
+                Use a ZIP containing documents or structured data. Unsupported
+                files are ignored, and duplicate names receive a numeric suffix.
+              </p>
             </div>
+          </div>
+
+          <div className="data-quality-guidance" role="note">
+            <div>
+              <FileText size={17} />
+              <span>
+                <strong>Good answers start with good source data</strong>
+                <small>
+                  RAG quality depends directly on the accuracy, completeness,
+                  and clarity of the files you provide.
+                </small>
+              </span>
+            </div>
+            <ul>
+              <li>Provide current, complete information with clear headings.</li>
+              <li>Use machine-readable text, not scanned images of documents.</li>
+              <li>Supported files: PDF, DOCX, TXT, Markdown, CSV, JSON, and XLSX.</li>
+              <li>Remove outdated, conflicting, empty, or irrelevant content.</li>
+            </ul>
           </div>
 
           <button
             className={zipFile ? 'data-dropzone selected' : 'data-dropzone'}
             type="button"
             onClick={() => fileInput.current?.click()}
-            disabled={active || uploadMutation.isPending}
+            disabled={active || uploadMutation.isPending || eraseMutation.isPending}
           >
             <FileArchive size={28} />
             <strong>{zipFile ? zipFile.name : 'Choose a ZIP file'}</strong>
@@ -216,7 +392,7 @@ export function DataPage() {
             type="file"
             accept=".zip,application/zip"
             onChange={(event) => chooseFile(event.target.files?.[0])}
-            disabled={active || uploadMutation.isPending}
+            disabled={active || uploadMutation.isPending || eraseMutation.isPending}
           />
 
           {uploadMutation.isError && (
@@ -233,14 +409,23 @@ export function DataPage() {
           <button
             className="primary-button data-action-button"
             type="submit"
-            disabled={!zipFile || active || uploadMutation.isPending}
+            disabled={
+              !zipFile ||
+              active ||
+              uploadMutation.isPending ||
+              eraseMutation.isPending
+            }
           >
             {uploadMutation.isPending ? (
               <i className="spinner" />
             ) : (
               <UploadCloud size={17} />
             )}
-            {uploadMutation.isPending ? 'Uploading ZIP' : 'Upload ZIP'}
+            {uploadMutation.isPending
+              ? 'Uploading ZIP'
+              : status === 'completed'
+                ? 'Add documents'
+                : 'Upload ZIP'}
           </button>
         </form>
 
@@ -299,7 +484,9 @@ export function DataPage() {
                 active ||
                 statusQuery.isLoading ||
                 statusQuery.isError ||
-                startMutation.isPending
+                startMutation.isPending ||
+                eraseMutation.isPending ||
+                confirmErase
               }
             >
               {active || startMutation.isPending ? (
