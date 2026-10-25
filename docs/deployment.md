@@ -1,16 +1,15 @@
 # Deployment
 
-The repository is organized as a deployment-ready foundation, with separate
-frontend, API, worker, database, and queue concerns. The included Compose file
-currently provisions only PostgreSQL/PGVector and Redis; it is not yet a
-one-command production deployment of every application process.
+The repository includes containers for the frontend, API, worker, database, and
+queue. Docker Compose provides a one-command local deployment of the complete
+application.
 
 ## Current local topology
 
 ```text
-Browser
-  └── Vite frontend :5173
-        └── FastAPI :8000
+Browser :5173
+  └── Nginx + React
+        └── FastAPI RAG API :8000
               ├── PostgreSQL/PGVector :6024
               ├── Redis :6379
               ├── local source-data directories
@@ -22,9 +21,22 @@ RQ worker
   └── evaluation-data directory
 ```
 
-Docker Compose provides health checks and persistent named volumes for the two
-stateful infrastructure services. API and frontend commands are documented in
+Docker Compose provides health checks, restarts application processes, and
+persists database, Redis, model-cache, source-data, credential-key, and
+evaluation state. Startup commands are documented in
 [Installation](installation.md).
+
+## Compose deployment
+
+```bash
+docker compose up --build -d
+docker compose ps
+```
+
+The frontend is available at `http://localhost:5173`. Nginx serves the React
+single-page application and proxies `/api/*` to FastAPI over the private Compose
+network. The API remains bound to localhost on port 8000 for documentation and
+diagnostics.
 
 ## Recommended production topology
 
@@ -53,7 +65,7 @@ In this topology:
 - Source and evaluation data use durable storage accessible to the processes
   that need them.
 
-## Build the frontend
+## Build the frontend outside Docker
 
 ```bash
 cd frontend
@@ -66,7 +78,7 @@ Static output is written to `frontend/dist/`. Serve it with a production web
 server and route `/api/*` to the backend. Vite's development proxy is not used in
 the production build.
 
-## Run application processes
+## Run application processes outside Docker
 
 The backend package provides these entry points:
 
@@ -77,9 +89,9 @@ The backend package provides these entry points:
 | Evaluation worker | `uv run employee-rag-worker` | RQ background jobs |
 | Dataset generator | `uv run employee-rag-generate-eval ...` | Direct JSONL generation |
 
-For production, run the API and worker under an orchestrator or process manager
-that restarts failed processes and captures logs. Define worker counts, timeouts,
-health probes, and graceful-shutdown behavior.
+The Compose deployment already restarts failed API and worker containers and
+captures their logs. A production orchestrator should additionally define
+worker counts, resource limits, metrics, alerts, and graceful-shutdown policy.
 
 ## Persistence requirements
 

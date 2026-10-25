@@ -32,6 +32,78 @@ services:
       timeout: 5s
       retries: 10
 
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: employee-rag-backend:local
+    container_name: employee-rag-api
+    command: ["employee-rag-system"]
+    init: true
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./structured_data:/app/structured_data
+      - ./temp_data:/app/temp_data
+      - ./evaluation_data:/app/evaluation_data
+      - ./.secrets:/app/.secrets
+      - huggingface_cache:/root/.cache/huggingface
+    depends_on:
+      pgvector:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8000/docs', timeout=5).read()
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: employee-rag-backend:local
+    container_name: employee-rag-worker
+    command: ["employee-rag-worker"]
+    init: true
+    restart: unless-stopped
+    volumes:
+      - ./data:/app/data
+      - ./structured_data:/app/structured_data
+      - ./temp_data:/app/temp_data
+      - ./evaluation_data:/app/evaluation_data
+      - ./.secrets:/app/.secrets
+      - huggingface_cache:/root/.cache/huggingface
+    depends_on:
+      pgvector:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: employee-rag-frontend:local
+    container_name: employee-rag-frontend
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5173:80"
+    depends_on:
+      api:
+        condition: service_healthy
+
 volumes:
   pgvector_data:
   redis_data:
+  huggingface_cache:

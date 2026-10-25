@@ -24,7 +24,18 @@ dependencies = [
     "redis>=5,<8",
     "rq>=2,<3",
     "sentence-transformers>=3,<6",
+    "torch>=2,<3",
 ]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu", marker = "sys_platform == 'linux'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [project.scripts]
 employee-rag-system = "app.api.main:main"

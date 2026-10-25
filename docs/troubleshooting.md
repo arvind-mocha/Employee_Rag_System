@@ -1,26 +1,33 @@
 # Troubleshooting
 
-Start by checking infrastructure:
+Start by checking the complete stack:
 
 ```bash
 docker compose ps
 ```
 
-PostgreSQL/PGVector and Redis should both report healthy. Confirm the API and,
-for evaluation, the RQ worker are running from the repository root.
+The frontend, API, PostgreSQL/PGVector, and Redis should report healthy. The RQ
+worker should report `Up`.
 
 ## The frontend cannot reach the API
 
 Symptoms include a request error, unavailable ingestion status, or provider
 settings failing to load.
 
-1. Open `http://localhost:8000/docs`.
-2. Confirm the API terminal has not exited.
-3. Confirm Vite is running on port 5173.
-4. Confirm `frontend/vite.config.ts` proxies `/api` to port 8000.
-5. Check whether another process is already using either port.
+1. Open `http://localhost:5173` and `http://localhost:8000/docs`.
+2. Run `docker compose ps`.
+3. Inspect `docker compose logs frontend api`.
+4. Confirm no unrelated process is using port 5173 or 8000.
+5. For local development only, confirm Vite is running and
+   `frontend/vite.config.ts` proxies `/api` to port 8000.
 
-Restart the API:
+Restart the containerized frontend and API:
+
+```bash
+docker compose restart frontend api
+```
+
+For local development, restart the API with:
 
 ```bash
 uv run uvicorn app.api.main:app --reload
@@ -182,9 +189,10 @@ docker compose down
 docker compose up -d
 ```
 
-`docker compose down -v` deletes PostgreSQL and Redis volumes. It is destructive
-and should be used only when intentionally resetting local state. It does not
-remove local source-data directories or the encryption key.
+`docker compose down -v` deletes PostgreSQL, Redis, and the downloaded
+embedding-model cache. It is destructive and should be used only when
+intentionally resetting local state. It does not remove bind-mounted source
+directories, evaluation datasets, or the encryption key.
 
 ## Collecting a useful error report
 
