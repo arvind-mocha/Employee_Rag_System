@@ -13,12 +13,14 @@ import {
   Coins,
   Copy,
   FileText,
+  History,
   KeyRound,
   Search,
   Send,
   Settings2,
   Sparkles,
   TerminalSquare,
+  Trash2,
 } from 'lucide-react'
 import { StrategyControls } from '../components/StrategyControls'
 import { api } from '../lib/api'
@@ -33,11 +35,19 @@ import {
 import type {
   AnswerRequest,
   AnswerResponse,
+  ConversationTurn,
   Provider,
   RetrievalOptions,
 } from '../types/api'
 
 type ResultTab = 'answer' | 'request'
+
+interface StoredSessionTurn extends ConversationTurn {
+  createdAt: string
+}
+
+const CHAT_SESSION_STORAGE_KEY = 'employee-rag-chat-session-v1'
+const MAX_SESSION_TURNS = 50
 
 const EXAMPLE_QUESTIONS = [
   'How many vacation days do employees receive?',
@@ -45,19 +55,93 @@ const EXAMPLE_QUESTIONS = [
   'What is the remote work policy?',
 ]
 
+function isStoredSessionTurn(value: unknown): value is StoredSessionTurn {
+  if (!value || typeof value !== 'object') return false
+  const turn = value as Record<string, unknown>
+  return (
+    typeof turn.question === 'string' &&
+    turn.question.trim().length > 0 &&
+    typeof turn.answer === 'string' &&
+    turn.answer.trim().length > 0 &&
+    typeof turn.createdAt === 'string'
+  )
+}
+
+function loadSessionTurns(): StoredSessionTurn[] {
+  try {
+    const stored = window.localStorage.getItem(CHAT_SESSION_STORAGE_KEY)
+    if (!stored) return []
+    const parsed: unknown = JSON.parse(stored)
+    if (!Array.isArray(parsed)) return []
+    return parsed.filter(isStoredSessionTurn).slice(-MAX_SESSION_TURNS)
+  } catch {
+    return []
+  }
+}
+
+function storeSessionTurns(turns: StoredSessionTurn[]) {
+  try {
+    window.localStorage.setItem(CHAT_SESSION_STORAGE_KEY, JSON.stringify(turns))
+  } catch {
+    // The in-memory session still works if browser storage is unavailable.
+  }
+}
+
 function buildRequest(
   question: string,
   provider: Provider,
   retrieval: RetrievalOptions,
+  history: StoredSessionTurn[],
 ): AnswerRequest {
   return {
     question: question.trim(),
+    history: history.map((turn) => ({
+      question: turn.question,
+      answer: turn.answer,
+    })),
     ...retrieval,
     gemini: provider === 'gemini',
     openai: provider === 'openai',
     anthropic: provider === 'anthropic',
     grok: provider === 'grok',
   }
+}
+
+function SessionHistory({ turns }: { turns: StoredSessionTurn[] }) {
+  if (!turns.length) return null
+
+  return (
+    <details className="session-history">
+      <summary>
+        <History size={16} />
+        <span>
+          Session history
+          <small>
+            {turns.length} completed {turns.length === 1 ? 'turn' : 'turns'}
+          </small>
+        </span>
+        <ChevronDown size={16} />
+      </summary>
+      <div className="session-turn-list">
+        {turns.map((turn, index) => (
+          <article key={`${turn.createdAt}-${index}`} className="session-turn">
+            <div>
+              <span>You</span>
+              <p>{turn.question}</p>
+            </div>
+            <div>
+              <span>Assistant</span>
+              <div className="session-turn-answer">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                  {turn.answer}
+                </ReactMarkdown>
+              </div>
+            </div>
+          </article>
+        ))}
+      </div>
+    </details>
+  )
 }
 
 function AnswerPanel({ response }: { response: AnswerResponse }) {
@@ -268,6 +352,8 @@ function RequestPanel({
 
 export function AskPage({ developerMode }: { developerMode: boolean }) {
   const [question, setQuestion] = useState('')
+  const [sessionTurns, setSessionTurns] =
+    useState<StoredSessionTurn[]>(loadSessionTurns)
   const [providerOverride, setProviderOverride] = useState<Provider | null>(null)
   const [retrieval, setRetrieval] =
     useState<RetrievalOptions>(DEFAULT_RETRIEVAL)
@@ -300,9 +386,21 @@ export function AskPage({ developerMode }: { developerMode: boolean }) {
       const response = await api.answer(request)
       return { response, latency: performance.now() - startedAt }
     },
-    onSuccess: (result) => {
+    onSuccess: (result, request) => {
       setLatency(result.latency)
       setResultTab('answer')
+      setSessionTurns((currentTurns) => {
+        const nextTurns = [
+          ...currentTurns,
+          {
+            question: request.question,
+            answer: result.response.answer,
+            createdAt: new Date().toISOString(),
+          },
+        ].slice(-MAX_SESSION_TURNS)
+        storeSessionTurns(nextTurns)
+        return nextTurns
+      })
     },
   })
 
@@ -322,11 +420,38 @@ export function AskPage({ developerMode }: { developerMode: boolean }) {
   const submit = (event: FormEvent) => {
     event.preventDefault()
     if (!canSubmit) return
-    const request = buildRequest(question, provider, retrieval)
+    const request = buildRequest(question, provider, retrieval, sessionTurns)
     setLastRequest(request)
     setQuestion('')
     answerMutation.mutate(request)
   }
+
+  const clearSession = () => {
+    if (
+      !window.confirm(
+        'Clear every saved question and answer in this browser session?',
+      )
+    ) {
+      return
+    }
+    try {
+      window.localStorage.removeItem(CHAT_SESSION_STORAGE_KEY)
+    } catch {
+      // Local in-memory content can still be cleared when storage is blocked.
+    }
+    setSessionTurns([])
+    setQuestion('')
+    setLastRequest(null)
+    setLatency(0)
+    setResultTab('answer')
+    answerMutation.reset()
+  }
+
+  const hasSessionContent =
+    sessionTurns.length > 0 ||
+    question.trim().length > 0 ||
+    Boolean(response) ||
+    Boolean(lastRequest)
 
   const visibleResultTab = developerMode ? resultTab : 'answer'
 
@@ -362,6 +487,35 @@ export function AskPage({ developerMode }: { developerMode: boolean }) {
               <Link to="/settings">Open settings</Link>
             </div>
           )}
+          <section className="session-memory-card">
+            <div className="session-memory-row">
+              <History size={18} />
+              <span>
+                <strong>Conversation memory</strong>
+                <small>
+                  {sessionTurns.length
+                    ? `${sessionTurns.length} completed ${sessionTurns.length === 1 ? 'turn' : 'turns'} saved in this browser`
+                    : 'No completed turns saved yet'}
+                </small>
+              </span>
+              <button
+                type="button"
+                onClick={clearSession}
+                disabled={!hasSessionContent || answerMutation.isPending}
+              >
+                <Trash2 size={15} />
+                Clear session
+              </button>
+            </div>
+            <p>
+              Up to 50 completed turns survive app restarts and are sent with your
+              next question. More history increases token usage and may increase
+              model cost.
+            </p>
+          </section>
+
+          <SessionHistory turns={sessionTurns} />
+
           <form className="question-box" onSubmit={submit}>
             <Search size={20} />
             <textarea

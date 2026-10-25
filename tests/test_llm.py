@@ -175,7 +175,7 @@ class ChatModelFactoryTests(unittest.TestCase):
         self.assertFalse(chat_class.call_args.kwargs["use_responses_api"])
 
     @patch("app.api.llm.get_chat_model_client")
-    def test_uses_gemini_native_structured_output(self, get_client) -> None:
+    def test_uses_provider_native_structured_output(self, get_client) -> None:
         model = Mock()
         structured_model = Mock()
         model.with_structured_output.return_value = structured_model
@@ -185,14 +185,14 @@ class ChatModelFactoryTests(unittest.TestCase):
             "parsing_error": None,
         }
         get_client.return_value = ChatModelClient(
-            LLMProvider.GEMINI,
-            "gemini-3.5-flash-lite",
+            LLMProvider.ANTHROPIC,
+            "claude-opus-5-5",
             model,
         )
 
         result = invoke_chat_model(
             [HumanMessage(content="Return structured output")],
-            LLMProvider.GEMINI,
+            LLMProvider.ANTHROPIC,
             response_schema=StructuredPayload,
         )
 
@@ -202,6 +202,7 @@ class ChatModelFactoryTests(unittest.TestCase):
         )
         model.with_structured_output.assert_called_once_with(
             StructuredPayload,
+            method="json_schema",
             include_raw=True,
         )
 
@@ -233,6 +234,40 @@ class AnswerGenerationTests(unittest.TestCase):
         self.assertEqual(result.chunks, ())
         search.assert_not_called()
         model.invoke.assert_not_called()
+
+    @patch("app.api.llm.get_chat_model_client")
+    def test_includes_session_history_when_selecting_a_tool(
+        self,
+        get_client,
+    ) -> None:
+        model = Mock()
+        tool_model = Mock()
+        model.bind_tools.return_value = tool_model
+        tool_model.invoke.return_value = AIMessage(content="A direct follow-up.")
+        get_client.return_value = ChatModelClient(
+            LLMProvider.OPENAI,
+            "test-model",
+            model,
+        )
+
+        generate_tool_driven_answer(
+            "What about part-time employees?",
+            LLMProvider.OPENAI,
+            Mock(),
+            history=[
+                (
+                    "What is the vacation policy?",
+                    "Full-time employees receive 15 days.",
+                )
+            ],
+        )
+
+        messages = tool_model.invoke.call_args.args[0]
+        self.assertIsInstance(messages[1], HumanMessage)
+        self.assertEqual(messages[1].content, "What is the vacation policy?")
+        self.assertIsInstance(messages[2], AIMessage)
+        self.assertIn("15 days", messages[2].content)
+        self.assertEqual(messages[-1].content, "What about part-time employees?")
 
     @patch("app.api.llm.get_chat_model_client")
     def test_executes_the_search_tool_and_generates_grounded_answer(

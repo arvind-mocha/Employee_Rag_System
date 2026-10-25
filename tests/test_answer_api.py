@@ -41,7 +41,9 @@ class AnswerApiTests(unittest.TestCase):
         router = Mock()
         router.search.return_value = [retrieved_chunk()]
         get_query_router.return_value = router
-        def generate(question, provider, search):
+
+        def generate(question, provider, search, *, history):
+            self.assertEqual(history, [])
             chunks = search(question)
             return ToolDrivenAnswer(
                 "Employees receive 15 vacation days [1].",
@@ -135,6 +137,20 @@ class AnswerApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 422)
 
+    def test_rejects_more_than_fifty_history_turns(self) -> None:
+        response = self.client.post(
+            "/api/v1/answers/generate",
+            json={
+                "question": "What about the policy?",
+                "history": [
+                    {"question": f"Question {index}", "answer": "Answer"}
+                    for index in range(51)
+                ],
+            },
+        )
+
+        self.assertEqual(response.status_code, 422)
+
     @patch("app.api.controllers.answer.generate_tool_driven_answer")
     @patch("app.api.controllers.answer.get_query_router")
     def test_returns_a_clear_answer_when_the_tool_finds_no_context(
@@ -144,7 +160,8 @@ class AnswerApiTests(unittest.TestCase):
     ) -> None:
         get_query_router.return_value.search.return_value = []
 
-        def generate(question, provider, search):
+        def generate(question, provider, search, *, history):
+            self.assertEqual(history, [])
             chunks = search(question)
             return ToolDrivenAnswer(
                 "I could not find relevant employee information.",
@@ -164,6 +181,41 @@ class AnswerApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json()["retrieval_used"])
         self.assertEqual(response.json()["sources"], [])
+
+    @patch("app.api.controllers.answer.generate_tool_driven_answer")
+    def test_forwards_browser_session_history_to_the_model(
+        self,
+        generate_answer,
+    ) -> None:
+        generate_answer.return_value = ToolDrivenAnswer(
+            "It refers to the vacation policy.",
+            LLMProvider.GEMINI,
+            "test-model",
+        )
+
+        response = self.client.post(
+            "/api/v1/answers/generate",
+            json={
+                "question": "What about part-time employees?",
+                "history": [
+                    {
+                        "question": "What is the vacation policy?",
+                        "answer": "Full-time employees receive 15 days.",
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            generate_answer.call_args.kwargs["history"],
+            [
+                (
+                    "What is the vacation policy?",
+                    "Full-time employees receive 15 days.",
+                )
+            ],
+        )
 
     @patch("app.api.controllers.answer.generate_tool_driven_answer")
     @patch("app.api.controllers.answer.get_query_router")

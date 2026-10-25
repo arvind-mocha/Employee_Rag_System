@@ -1,14 +1,42 @@
 """Schemas for retrieval-grounded answer generation."""
 
-from pydantic import Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.api.llm_usage import LLMUsage
 from app.api.schemas.retrieval import RetrievalRequest, RetrievedChunkResponse
+from app.retrieval.config import RETRIEVAL_SETTINGS
+
+
+MAX_SESSION_HISTORY_TURNS = 50
+MAX_SESSION_ANSWER_LENGTH = 10_000
+
+
+class ConversationTurn(BaseModel):
+    """One completed user/assistant exchange from the browser session."""
+
+    question: str = Field(
+        min_length=1,
+        max_length=RETRIEVAL_SETTINGS.maximum_question_length,
+    )
+    answer: str = Field(min_length=1, max_length=MAX_SESSION_ANSWER_LENGTH)
+
+    @field_validator("question", "answer")
+    @classmethod
+    def normalize_content(cls, content: str) -> str:
+        normalized_content = content.strip()
+        if not normalized_content:
+            raise ValueError("conversation content must not be empty")
+        return normalized_content
 
 
 class AnswerRequest(RetrievalRequest):
     """Question, retrieval controls, and one optional LLM provider switch."""
 
+    history: list[ConversationTurn] = Field(
+        default_factory=list,
+        max_length=MAX_SESSION_HISTORY_TURNS,
+        description="Completed turns from the current browser chat session.",
+    )
     gemini: bool = Field(
         default=False,
         description="Use Google Gemini; this is also the default provider.",

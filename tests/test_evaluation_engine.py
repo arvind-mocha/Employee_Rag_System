@@ -10,6 +10,7 @@ from app.evaluation.engine import (
     QUESTION_GENERATION_BASE_OUTPUT_TOKENS,
     QUESTION_GENERATION_CATEGORY_BATCH_SIZE,
     QUESTION_GENERATION_OUTPUT_TOKENS_PER_QUESTION,
+    REFERENCE_GENERATION_MAX_OUTPUT_TOKENS,
     evaluate_record,
     generate_evaluation_questions,
     generate_ground_truth_records,
@@ -266,6 +267,10 @@ class GroundTruthGenerationTests(unittest.TestCase):
         self.assertEqual(records[0].relevant_evidence[0].chunk_id, "chunk-1")
         self.assertEqual(records[0].review_status, "machine_generated")
         self.assertEqual(records[0].reference_usage.estimated_cost_usd, 0.001)
+        self.assertEqual(
+            invoke.call_args.kwargs["max_output_tokens"],
+            REFERENCE_GENERATION_MAX_OUTPUT_TOKENS,
+        )
 
     @patch("app.evaluation.engine.invoke_chat_model")
     def test_uses_source_anchors_when_retrieval_misses(self, invoke) -> None:

@@ -85,6 +85,8 @@ QUESTION_GENERATION_CATEGORY_BATCH_SIZE = 3
 QUESTION_GENERATION_BASE_OUTPUT_TOKENS = 512
 QUESTION_GENERATION_OUTPUT_TOKENS_PER_QUESTION = 128
 QUESTION_GENERATION_MAX_OUTPUT_TOKENS = 8_192
+REFERENCE_GENERATION_MAX_OUTPUT_TOKENS = 4_096
+JUDGE_GENERATION_MAX_OUTPUT_TOKENS = 4_096
 
 
 class EvaluationOutputError(ValueError):
@@ -433,6 +435,7 @@ def generate_ground_truth_records(
         generated = invoke_chat_model(
             build_reference_messages(question, chunks),
             reference_provider,
+            max_output_tokens=REFERENCE_GENERATION_MAX_OUTPUT_TOKENS,
             response_schema=ReferenceDraft,
         )
         draft = _reference_draft(generated.text)
@@ -675,6 +678,7 @@ def evaluate_record(
         judged = invoke_chat_model(
             build_judge_messages(record, generated_answer.answer, chunks),
             judge_provider,
+            max_output_tokens=JUDGE_GENERATION_MAX_OUTPUT_TOKENS,
             response_schema=JudgeDraft,
         )
         judge = _judge_draft(judged.text)

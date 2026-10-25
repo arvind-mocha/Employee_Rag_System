@@ -52,6 +52,10 @@ def answer_question(request: AnswerRequest) -> AnswerResponse:
             request.question,
             provider,
             search_employee_knowledge,
+            history=[
+                (turn.question, turn.answer)
+                for turn in request.history
+            ],
         )
     except HTTPException:
         raise

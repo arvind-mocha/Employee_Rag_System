@@ -77,6 +77,11 @@ export interface RetrievedChunk {
   chunk_index: number | null
 }
 
+export interface ConversationTurn {
+  question: string
+  answer: string
+}
+
 export interface LlmUsage {
   input_tokens: number
   cached_input_tokens: number
@@ -108,6 +113,7 @@ export interface LlmUsageSummary {
 
 export interface AnswerRequest extends RetrievalOptions {
   question: string
+  history: ConversationTurn[]
   gemini: boolean
   openai: boolean
   anthropic: boolean

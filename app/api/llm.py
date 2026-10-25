@@ -318,13 +318,15 @@ def generate_grounded_answer(
     question: str,
     chunks: list[RetrievedChunk],
     provider: LLMProvider,
+    *,
+    history: Sequence[tuple[str, str]] = (),
 ) -> GeneratedAnswer:
     """Generate one answer grounded in the supplied retrieved chunks."""
     if not chunks:
         raise ValueError("at least one retrieved chunk is required")
 
     generated = invoke_chat_model(
-        build_answer_messages(question, chunks),
+        build_answer_messages(question, chunks, history),
         provider,
     )
     return GeneratedAnswer(
@@ -388,14 +390,11 @@ def _invoke_client(
 ) -> tuple[BaseMessage, LLMUsage]:
     try:
         selected_runnable = runnable if runnable is not None else client.model
-        uses_native_structure = (
-            response_schema is not None
-            and runnable is None
-            and client.provider is LLMProvider.GEMINI
-        )
+        uses_native_structure = response_schema is not None and runnable is None
         if uses_native_structure:
             selected_runnable = client.model.with_structured_output(
                 response_schema,
+                method="json_schema",
                 include_raw=True,
             )
         result = selected_runnable.invoke(messages)
@@ -403,13 +402,13 @@ def _invoke_client(
         if uses_native_structure:
             if not isinstance(result, Mapping):
                 raise TypeError(
-                    "Gemini structured output did not include its raw response."
+                    "Structured output did not include its raw response."
                 )
             response = result.get("raw")
             parsed = result.get("parsed")
             if not isinstance(response, BaseMessage):
                 raise TypeError(
-                    "Gemini structured output did not include a model message."
+                    "Structured output did not include a model message."
                 )
         else:
             response = result
@@ -447,6 +446,8 @@ def generate_tool_driven_answer(
     question: str,
     provider: LLMProvider,
     search: Callable[[str], list[RetrievedChunk]],
+    *,
+    history: Sequence[tuple[str, str]] = (),
 ) -> ToolDrivenAnswer:
     """Let the chat model decide whether to search employee knowledge."""
     retrieved_chunks: list[RetrievedChunk] = []
@@ -464,7 +465,7 @@ def generate_tool_driven_answer(
         return format_retrieval_context(retrieved_chunks)
 
     client = get_chat_model_client(provider)
-    selection_messages = build_tool_selection_messages(question)
+    selection_messages = build_tool_selection_messages(question, history)
     try:
         tool_model = client.model.bind_tools(
             [search_employee_knowledge],
@@ -526,7 +527,11 @@ def generate_tool_driven_answer(
             retrieval_query=retrieval_query,
         )
 
-    grounded_messages = build_answer_messages(question, retrieved_chunks)
+    grounded_messages = build_answer_messages(
+        question,
+        retrieved_chunks,
+        history,
+    )
     grounded_response, grounded_usage = _invoke_client(
         client,
         grounded_messages,
@@ -554,7 +559,7 @@ def invoke_chat_model(
     max_output_tokens: int = MAX_ANSWER_TOKENS,
     response_schema: type[BaseModel] | None = None,
 ) -> GeneratedText:
-    """Invoke one provider and optionally constrain Gemini to a JSON schema."""
+    """Invoke one provider and optionally constrain it to a JSON schema."""
     client = get_chat_model_client(
         provider,
         max_output_tokens=max_output_tokens,
