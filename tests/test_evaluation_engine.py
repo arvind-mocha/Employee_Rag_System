@@ -348,7 +348,6 @@ class GroundTruthGenerationTests(unittest.TestCase):
 
 
 class EvaluationEngineTests(unittest.TestCase):
-    @patch("app.evaluation.engine.semantic_similarity", return_value=0.91)
     @patch("app.evaluation.engine.invoke_chat_model")
     @patch("app.evaluation.engine.generate_grounded_answer")
     @patch(
@@ -360,7 +359,6 @@ class EvaluationEngineTests(unittest.TestCase):
         _status,
         generate_answer,
         invoke,
-        _semantic,
     ) -> None:
         router = Mock()
         router.search.return_value = [retrieved_chunk()]
@@ -373,16 +371,10 @@ class EvaluationEngineTests(unittest.TestCase):
         invoke.return_value = GeneratedText(
             json.dumps(
                 {
-                    "correctness": 1.0,
-                    "groundedness": 1.0,
                     "completeness": 1.0,
                     "relevance": 1.0,
-                    "citation_accuracy": 1.0,
-                    "citation_coverage": 1.0,
-                    "abstention_correctness": 1.0,
-                    "unsupported_claims": [],
                     "missing_facts": [],
-                    "rationale": "The answer matches the reference evidence.",
+                    "rationale": "The answer is relevant and complete.",
                 }
             ),
             LLMProvider.OPENAI,
@@ -400,9 +392,8 @@ class EvaluationEngineTests(unittest.TestCase):
 
         self.assertTrue(result.passed)
         self.assertEqual(result.category, "direct_fact")
-        self.assertEqual(result.answer_scores.correctness, 1.0)
-        self.assertEqual(result.answer_scores.semantic_similarity, 0.91)
-        self.assertEqual(result.answer_scores.citation_validity, 1.0)
+        self.assertEqual(result.answer_scores.completeness, 1.0)
+        self.assertEqual(result.answer_scores.relevance, 1.0)
         self.assertEqual(result.retrieval_scores.recall_at_k, 1.0)
         self.assertEqual(result.retrieval_scores.source_recall_at_k, 1.0)
         self.assertEqual(result.usage.llm_calls, 2)

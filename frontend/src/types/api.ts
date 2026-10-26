@@ -140,30 +140,14 @@ export interface ScoreAverages {
   ndcg_at_k: number | null
   source_precision_at_k: number | null
   source_recall_at_k: number | null
-  correctness: number | null
-  groundedness: number | null
   completeness: number | null
   relevance: number | null
-  citation_accuracy: number | null
-  citation_coverage: number | null
-  citation_validity: number | null
-  abstention_correctness: number | null
-  lexical_similarity: number | null
-  semantic_similarity: number | null
   overall: number | null
 }
 
 export interface AnswerScores {
-  correctness: number
-  groundedness: number
   completeness: number
   relevance: number
-  citation_accuracy: number
-  citation_coverage: number
-  citation_validity: number
-  abstention_correctness: number
-  lexical_similarity: number
-  semantic_similarity: number | null
   overall: number
 }
 

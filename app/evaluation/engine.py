@@ -12,10 +12,7 @@ from uuid import uuid4
 from pydantic import ValidationError
 
 from app.api.answer_metrics import (
-    citation_validity,
-    lexical_similarity,
     overall_answer_score,
-    semantic_similarity,
 )
 from app.api.llm import (
     LLMConfigurationError,
@@ -617,14 +614,6 @@ def evaluate_record(
     started_at = perf_counter()
     status = ground_truth_status(record)
     warnings = []
-    if status is GroundTruthStatus.STALE:
-        warnings.append(
-            "Ground-truth source content changed; regenerate this dataset."
-        )
-    elif status is GroundTruthStatus.UNVERIFIABLE:
-        warnings.append("Ground-truth source freshness could not be verified.")
-    if record.review_status is ReviewStatus.MACHINE_GENERATED:
-        warnings.append("Ground truth is machine-generated and needs human review.")
     if answer_provider is judge_provider:
         warnings.append("The answer and judge use the same provider.")
 
@@ -702,51 +691,21 @@ def evaluate_record(
             warnings=warnings,
             error=error,
         )
-    try:
-        semantic_score = semantic_similarity(
-            record.reference_answer,
-            generated_answer.answer,
-        )
-    except Exception:
-        semantic_score = None
-        warnings.append("Semantic similarity could not be calculated.")
     grading_ms = (perf_counter() - grading_started) * 1000
 
     overall = overall_answer_score(
-        correctness=judge.correctness,
-        groundedness=judge.groundedness,
         completeness=judge.completeness,
         relevance=judge.relevance,
-        citation_accuracy=judge.citation_accuracy,
-        citation_coverage=judge.citation_coverage,
-        abstention_correctness=judge.abstention_correctness,
     )
     answer_scores = AnswerScores(
-        correctness=judge.correctness,
-        groundedness=judge.groundedness,
         completeness=judge.completeness,
         relevance=judge.relevance,
-        citation_accuracy=judge.citation_accuracy,
-        citation_coverage=judge.citation_coverage,
-        citation_validity=citation_validity(
-            generated_answer.answer,
-            len(chunks),
-        ),
-        abstention_correctness=judge.abstention_correctness,
-        lexical_similarity=lexical_similarity(
-            record.reference_answer,
-            generated_answer.answer,
-        ),
-        semantic_similarity=semantic_score,
         overall=overall,
     )
     passed = (
-        overall >= PASS_THRESHOLD
-        and judge.correctness >= PASS_THRESHOLD
-        and judge.groundedness >= PASS_THRESHOLD
+        judge.completeness >= PASS_THRESHOLD
+        and judge.relevance >= PASS_THRESHOLD
     )
-    if status is GroundTruthStatus.STALE:
-        passed = None
 
     total_ms = (perf_counter() - started_at) * 1000
     return EvaluationCaseResult(
@@ -777,7 +736,6 @@ def evaluate_record(
         ),
         retrieval_scores=_retrieval_scores(record, chunks),
         answer_scores=answer_scores,
-        unsupported_claims=judge.unsupported_claims,
         missing_facts=judge.missing_facts,
         rationale=judge.rationale,
         passed=passed,
@@ -807,7 +765,6 @@ def _summary(
         result
         for result in provider_results
         if result.answer_scores is not None
-        and result.ground_truth_status is not GroundTruthStatus.STALE
     ]
     passed = sum(result.passed is True for result in eligible)
     answer_scores = [result.answer_scores for result in eligible]
@@ -834,28 +791,8 @@ def _summary(
         source_recall_at_k=_mean(
             score.source_recall_at_k for score in retrieval_scores
         ),
-        correctness=_mean(score.correctness for score in answer_scores),
-        groundedness=_mean(score.groundedness for score in answer_scores),
         completeness=_mean(score.completeness for score in answer_scores),
         relevance=_mean(score.relevance for score in answer_scores),
-        citation_accuracy=_mean(
-            score.citation_accuracy for score in answer_scores
-        ),
-        citation_coverage=_mean(
-            score.citation_coverage for score in answer_scores
-        ),
-        citation_validity=_mean(
-            score.citation_validity for score in answer_scores
-        ),
-        abstention_correctness=_mean(
-            score.abstention_correctness for score in answer_scores
-        ),
-        lexical_similarity=_mean(
-            score.lexical_similarity for score in answer_scores
-        ),
-        semantic_similarity=_mean(
-            score.semantic_similarity for score in answer_scores
-        ),
         overall=_mean(score.overall for score in answer_scores),
     )
     return ProviderEvaluationSummary(

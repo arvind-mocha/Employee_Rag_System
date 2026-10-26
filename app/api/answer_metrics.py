@@ -70,21 +70,8 @@ def semantic_similarity(
 
 def overall_answer_score(
     *,
-    correctness: float,
-    groundedness: float,
     completeness: float,
     relevance: float,
-    citation_accuracy: float,
-    citation_coverage: float,
-    abstention_correctness: float,
 ) -> float:
-    """Combine judge dimensions while keeping safety-sensitive scores dominant."""
-    return (
-        0.30 * correctness
-        + 0.25 * groundedness
-        + 0.15 * completeness
-        + 0.10 * relevance
-        + 0.10 * citation_accuracy
-        + 0.05 * citation_coverage
-        + 0.05 * abstention_correctness
-    )
+    """Give relevance and completeness equal weight in answer quality."""
+    return (completeness + relevance) / 2

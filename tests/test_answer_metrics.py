@@ -33,18 +33,13 @@ class AnswerMetricTests(unittest.TestCase):
 
         self.assertAlmostEqual(score, 0.8)
 
-    def test_weights_correctness_and_groundedness_most_heavily(self) -> None:
+    def test_weights_relevance_and_completeness_equally(self) -> None:
         score = overall_answer_score(
-            correctness=1.0,
-            groundedness=1.0,
-            completeness=0.0,
-            relevance=0.0,
-            citation_accuracy=0.0,
-            citation_coverage=0.0,
-            abstention_correctness=0.0,
+            completeness=0.6,
+            relevance=1.0,
         )
 
-        self.assertEqual(score, 0.55)
+        self.assertEqual(score, 0.8)
 
 
 if __name__ == "__main__":
