@@ -17,7 +17,7 @@ from app.api import config
 from app.core.vector_store import PGVectorSettings
 
 
-PROVIDERS = ("huggingface", "openai", "anthropic", "grok")
+PROVIDERS = ("gemini", "openai", "anthropic", "grok")
 KEY_BYTES = 32
 KEY_VERSION = 1
 DEFAULT_KEY_PATH = config.CREDENTIAL_ENCRYPTION_KEY_FILE
@@ -372,10 +372,34 @@ class CredentialStore:
                                     DEFAULT CURRENT_TIMESTAMP,
                                 CONSTRAINT provider_credentials_provider_check
                                     CHECK (provider IN (
-                                        'huggingface', 'openai',
+                                        'gemini', 'openai',
                                         'anthropic', 'grok'
                                     ))
                             )
+                            """
+                        )
+                        # Migrate installations created before Gemini replaced
+                        # Hugging Face as a supported chat provider. An old token
+                        # cannot authenticate with Gemini, so it is intentionally
+                        # removed instead of being relabeled.
+                        cursor.execute(
+                            """
+                            ALTER TABLE provider_credentials
+                            DROP CONSTRAINT IF EXISTS
+                                provider_credentials_provider_check
+                            """
+                        )
+                        cursor.execute(
+                            "DELETE FROM provider_credentials "
+                            "WHERE provider = 'huggingface'"
+                        )
+                        cursor.execute(
+                            """
+                            ALTER TABLE provider_credentials
+                            ADD CONSTRAINT provider_credentials_provider_check
+                            CHECK (provider IN (
+                                'gemini', 'openai', 'anthropic', 'grok'
+                            ))
                             """
                         )
                         cursor.execute(

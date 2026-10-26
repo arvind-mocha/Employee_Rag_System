@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 def answer_question(request: AnswerRequest) -> AnswerResponse:
     """Let one provider-selected model decide whether retrieval is needed."""
     provider = select_provider(
-        hf=request.hf,
+        gemini=request.gemini,
         openai=request.openai,
         anthropic=request.anthropic,
         grok=request.grok,
@@ -52,6 +52,10 @@ def answer_question(request: AnswerRequest) -> AnswerResponse:
             request.question,
             provider,
             search_employee_knowledge,
+            history=[
+                (turn.question, turn.answer)
+                for turn in request.history
+            ],
         )
     except HTTPException:
         raise

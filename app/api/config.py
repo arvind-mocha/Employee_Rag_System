@@ -39,7 +39,6 @@ EMBEDDING_DEVICE = "cpu"
 
 # Provider integration defaults. API keys and selected model IDs are managed
 # through the Settings page instead of source configuration.
-HUGGINGFACE_INFERENCE_PROVIDER = "auto"
 GROK_BASE_URL = "https://api.x.ai/v1"
 
 # input, output, cached input, and cache-creation USD per million tokens.

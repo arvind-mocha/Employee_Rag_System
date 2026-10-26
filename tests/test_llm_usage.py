@@ -60,8 +60,8 @@ class LLMUsageTests(unittest.TestCase):
         usage = calculate_llm_usage(
             [HumanMessage(content="A short question")],
             response,
-            "huggingface",
-            "google/gemma-2-2b-it",
+            "gemini",
+            "unknown-gemini-model",
         )
 
         self.assertEqual(usage.token_count_source, "estimated")
@@ -86,7 +86,7 @@ class LLMUsageTests(unittest.TestCase):
         unpriced = calculate_llm_usage(
             [HumanMessage(content="Question")],
             AIMessage(content="Answer"),
-            "huggingface",
+            "gemini",
             "unknown-model",
         )
 

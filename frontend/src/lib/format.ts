@@ -11,10 +11,10 @@ export const PROVIDERS: Array<{
   description: string
 }> = [
   {
-    id: 'huggingface',
-    name: 'Hugging Face',
-    shortName: 'HF',
-    description: 'Default · lowest cost',
+    id: 'gemini',
+    name: 'Google Gemini',
+    shortName: 'GM',
+    description: 'Default · Flash-Lite',
   },
   { id: 'openai', name: 'OpenAI', shortName: 'OA', description: 'OpenAI model' },
   {
@@ -27,7 +27,7 @@ export const PROVIDERS: Array<{
 ]
 
 export const PROVIDER_COLORS: Record<Provider, string> = {
-  huggingface: '#21675c',
+  gemini: '#21675c',
   openai: '#db7c41',
   anthropic: '#6d5fa8',
   grok: '#2975a8',

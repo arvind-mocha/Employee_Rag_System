@@ -1,10 +1,11 @@
-import { FormEvent, useMemo, useState } from 'react'
+import { FormEvent, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import {
   AlertTriangle,
   BarChart3,
   Check,
   CheckCircle2,
+  ChevronRight,
   ChevronDown,
   CircleDollarSign,
   Database,
@@ -49,6 +50,7 @@ import {
 } from '../lib/format'
 import type {
   EvaluationJobAccepted,
+  EvaluationResult,
   EvaluationRun,
   Provider,
   RetrievalOptions,
@@ -61,7 +63,7 @@ const TERMINAL_JOB_STATES = new Set([
   'canceled',
 ])
 
-const EVALUATION_JOB_STORAGE_KEY = 'employee-rag-active-evaluation-job'
+const EVALUATION_JOB_STORAGE_KEY = 'employee-rag-active-evaluation-job-v2'
 const DATASET_JOB_STORAGE_KEY = 'employee-rag-active-dataset-job'
 const DATASET_NAME_STORAGE_KEY = 'employee-rag-evaluation-dataset-name'
 const STORED_JOB_MAX_AGE_MS = 25 * 60 * 60 * 1_000
@@ -234,7 +236,45 @@ function MetricCard({
   )
 }
 
+const PASS_THRESHOLD = 0.8
+
+function scoreIssueLabel(label: string, value: number | null | undefined) {
+  if (value == null || value >= PASS_THRESHOLD) return null
+  return `${label} was ${Math.round(value * 100)}%, below the 80% pass threshold.`
+}
+
+function answerProblems(result: EvaluationResult) {
+  const problems = [
+    scoreIssueLabel('Completeness', result.answer_scores?.completeness),
+    scoreIssueLabel('Relevance', result.answer_scores?.relevance),
+  ].filter((problem): problem is string => Boolean(problem))
+
+  if (result.error) problems.unshift(result.error)
+  if (!result.answer && !result.error) problems.push('The model did not return an answer.')
+  return problems
+}
+
+function CaseScore({
+  label,
+  value,
+}: {
+  label: string
+  value: number | null | undefined
+}) {
+  const belowThreshold = value != null && value < PASS_THRESHOLD
+  return (
+    <div className={belowThreshold ? 'case-score below-threshold' : 'case-score'}>
+      <span>{label}</span>
+      <strong>{score100(value)}</strong>
+      <div className="case-score-track" aria-hidden="true">
+        <i style={{ width: `${Math.max(0, Math.min(100, (value ?? 0) * 100))}%` }} />
+      </div>
+    </div>
+  )
+}
+
 function EvaluationDashboard({ run }: { run: EvaluationRun }) {
+  const [selectedCase, setSelectedCase] = useState<EvaluationResult | null>(null)
   const chartData = useMemo(
     () =>
       CATEGORIES.filter((category) =>
@@ -265,9 +305,9 @@ function EvaluationDashboard({ run }: { run: EvaluationRun }) {
   )
 
   const overall = averageResultScore(run.results, (result) => result.answer_scores?.overall)
-  const groundedness = averageResultScore(
+  const completeness = averageResultScore(
     run.results,
-    (result) => result.answer_scores?.groundedness,
+    (result) => result.answer_scores?.completeness,
   )
   const retrievalRecall = averageResultScore(
     run.results,
@@ -299,14 +339,14 @@ function EvaluationDashboard({ run }: { run: EvaluationRun }) {
             icon={<Gauge size={18} />}
             label="Overall score"
             value={score100(overall)}
-            detail="Average across all answers"
+            detail="Relevance and completeness"
             accent
           />
           <MetricCard
-            icon={<ShieldCheck size={18} />}
-            label="Groundedness"
-            value={score100(groundedness)}
-            detail="Claims supported by evidence"
+            icon={<CheckCircle2 size={18} />}
+            label="Completeness"
+            value={score100(completeness)}
+            detail="Required information included"
           />
           <MetricCard
             icon={<Target size={18} />}
@@ -387,8 +427,8 @@ function EvaluationDashboard({ run }: { run: EvaluationRun }) {
             </ResponsiveContainer>
           </div>
           <div className="chart-note">
-            <Info size={14} /> Categories are assigned while ground truth is
-            generated and returned with each evaluation result.
+            <Info size={14} /> The overall score gives equal weight to relevance
+            and completeness.
           </div>
         </section>
       </div>
@@ -413,8 +453,8 @@ function EvaluationDashboard({ run }: { run: EvaluationRun }) {
                 <b>{score100(summary.average_scores.overall)}</b>
               </div>
               <div>
-                <span>Correctness</span>
-                <b>{percent(summary.average_scores.correctness)}</b>
+                <span>Relevance</span>
+                <b>{percent(summary.average_scores.relevance)}</b>
               </div>
               <div>
                 <span>Pass rate</span>
@@ -438,72 +478,157 @@ function EvaluationDashboard({ run }: { run: EvaluationRun }) {
           <div>
             <span>Question-level detail</span>
             <h3>Evaluation cases</h3>
+            <p>Select a case to inspect its answer and understand what needs improvement.</p>
           </div>
-          <span className="row-count">{run.results.length} results</span>
+          <span className="row-count">{run.results.length} cases</span>
         </div>
-        <div className="table-scroll">
-          <table className="results-table">
-            <thead>
-              <tr>
-                <th>Question</th>
-                <th>Category</th>
-                <th>Model</th>
-                <th>Overall</th>
-                <th>Correct</th>
-                <th>Grounded</th>
-                <th>Issues</th>
-                <th>Latency</th>
-                <th>Result</th>
-              </tr>
-            </thead>
-            <tbody>
-              {run.results.map((result) => (
-                <tr key={`${result.record_id}-${result.answer_provider}`}>
-                  <td>
-                    <strong>{result.question}</strong>
-                    <small>{result.record_id}</small>
-                  </td>
-                  <td>
-                    <span className="category-pill">
-                      {categoryLabel(result.category)}
-                    </span>
-                  </td>
-                  <td>{providerName(result.answer_provider)}</td>
-                  <td className="score-cell">{score100(result.answer_scores?.overall)}</td>
-                  <td>{percent(result.answer_scores?.correctness)}</td>
-                  <td>{percent(result.answer_scores?.groundedness)}</td>
-                  <td>
-                    <span className={result.unsupported_claims.length ? 'issue-count warn' : 'issue-count'}>
-                      {result.unsupported_claims.length} unsupported
-                    </span>
-                    <span className={result.missing_facts.length ? 'issue-count warn' : 'issue-count'}>
-                      {result.missing_facts.length} missing
-                    </span>
-                  </td>
-                  <td>{milliseconds(result.timing.total_ms)}</td>
-                  <td>
-                    {result.error ? (
-                      <span className="result-badge error">Error</span>
-                    ) : result.passed ? (
-                      <span className="result-badge pass">Pass</span>
-                    ) : (
-                      <span className="result-badge fail">Fail</span>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+        <div className="evaluation-case-list">
+          <div className="evaluation-case-head" aria-hidden="true">
+            <span>Question</span>
+            <span>Model</span>
+            <span>Overall</span>
+            <span>Issues</span>
+            <span>Latency</span>
+          </div>
+          {run.results.map((result) => {
+            const issueCount = result.missing_facts.length
+            return (
+              <button
+                type="button"
+                className="evaluation-case-row"
+                key={`${result.record_id}-${result.answer_provider}`}
+                onClick={() => setSelectedCase(result)}
+                aria-label={`View answer for: ${result.question}`}
+              >
+                <span className="evaluation-case-question">
+                  <strong>{result.question}</strong>
+                  <small>
+                    <span className="category-pill">{categoryLabel(result.category)}</span>
+                    {result.record_id}
+                  </small>
+                </span>
+                <span className="evaluation-case-model">
+                  <i style={{ background: PROVIDER_COLORS[result.answer_provider] }} />
+                  {providerName(result.answer_provider)}
+                </span>
+                <strong className="evaluation-case-score">
+                  {score100(result.answer_scores?.overall)}
+                </strong>
+                <span className={issueCount || result.error ? 'evaluation-case-issues has-issues' : 'evaluation-case-issues'}>
+                  {result.error
+                    ? 'Evaluation error'
+                    : issueCount
+                      ? `${issueCount} ${issueCount === 1 ? 'issue' : 'issues'}`
+                      : 'No flagged issues'}
+                </span>
+                <span className="evaluation-case-latency">
+                  {milliseconds(result.timing.total_ms)}
+                </span>
+                <ChevronRight className="evaluation-case-arrow" size={17} />
+              </button>
+            )
+          })}
         </div>
       </section>
+
+      {selectedCase && (
+        <div
+          className="case-detail-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.currentTarget === event.target) setSelectedCase(null)
+          }}
+        >
+          <aside
+            className="case-detail-panel"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="case-detail-title"
+          >
+            <div className="case-detail-header">
+              <div>
+                <span className="eyebrow">Evaluation case</span>
+                <h3 id="case-detail-title">{selectedCase.question}</h3>
+                <p>
+                  {providerName(selectedCase.answer_provider)} · {categoryLabel(selectedCase.category)} ·{' '}
+                  {milliseconds(selectedCase.timing.total_ms)}
+                </p>
+              </div>
+              <button type="button" onClick={() => setSelectedCase(null)} aria-label="Close case details">
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="case-detail-body">
+              <section className="case-answer-block">
+                <span>Generated answer</span>
+                <p>{selectedCase.answer || 'No answer was returned by the model.'}</p>
+              </section>
+
+              <section className="case-diagnosis">
+                <div className="case-detail-section-title">
+                  <AlertTriangle size={17} />
+                  <div>
+                    <span>Diagnosis</span>
+                    <h4>What is wrong with this answer?</h4>
+                  </div>
+                </div>
+                {answerProblems(selectedCase).length ? (
+                  <ul className="case-problem-list">
+                    {answerProblems(selectedCase).map((problem) => (
+                      <li key={problem}>{problem}</li>
+                    ))}
+                  </ul>
+                ) : (
+                  <div className="case-no-problems">
+                    <CheckCircle2 size={17} />
+                    No threshold failures were found for this answer.
+                  </div>
+                )}
+
+                <div className="case-score-grid">
+                  <CaseScore label="Overall" value={selectedCase.answer_scores?.overall} />
+                  <CaseScore label="Completeness" value={selectedCase.answer_scores?.completeness} />
+                  <CaseScore label="Relevance" value={selectedCase.answer_scores?.relevance} />
+                </div>
+                <p className="case-threshold-note">Completeness and relevance must both be at least 80% to pass.</p>
+              </section>
+
+              {selectedCase.missing_facts.length > 0 && (
+                <div className="case-issue-columns single">
+                  <section>
+                    <span>Missing facts</span>
+                    <ul>{selectedCase.missing_facts.map((fact) => <li key={fact}>{fact}</li>)}</ul>
+                  </section>
+                </div>
+              )}
+
+              {selectedCase.rationale && (
+                <section className="case-copy-block">
+                  <span>Judge explanation</span>
+                  <p>{selectedCase.rationale}</p>
+                </section>
+              )}
+
+              {selectedCase.warnings.length > 0 && (
+                <section className="case-warning-block">
+                  <span>Warnings</span>
+                  <ul>{selectedCase.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul>
+                </section>
+              )}
+            </div>
+          </aside>
+        </div>
+      )}
     </div>
   )
 }
 
 export function EvaluationPage() {
+  const datasetBuilderRef = useRef<HTMLElement>(null)
   const [datasetName, setDatasetName] = useState(readStoredDatasetName)
   const [answerProviders, setAnswerProviders] = useState<Provider[]>([
-    'huggingface',
+    'gemini',
     'openai',
   ])
   const [judgeProvider, setJudgeProvider] = useState<Provider>('openai')
@@ -516,7 +641,7 @@ export function EvaluationPage() {
   const [showDatasetBuilder, setShowDatasetBuilder] = useState(false)
   const [questionsPerCategory, setQuestionsPerCategory] = useState(1)
   const [referenceProvider, setReferenceProvider] =
-    useState<Provider>('huggingface')
+    useState<Provider>('gemini')
   const [overwrite, setOverwrite] = useState(false)
   const [datasetJob, setDatasetJob] = useState<EvaluationJobAccepted | null>(
     () => readStoredJob(DATASET_JOB_STORAGE_KEY),
@@ -594,6 +719,20 @@ export function EvaluationPage() {
     })
   }
 
+  const toggleDatasetBuilder = () => {
+    if (showDatasetBuilder) {
+      setShowDatasetBuilder(false)
+      return
+    }
+    setShowDatasetBuilder(true)
+    window.requestAnimationFrame(() => {
+      datasetBuilderRef.current?.scrollIntoView({
+        behavior: 'smooth',
+        block: 'start',
+      })
+    })
+  }
+
   const activeEvaluation = evaluationMutation.isPending || Boolean(
     evaluationStatus.data && !TERMINAL_JOB_STATES.has(evaluationStatus.data.status),
   )
@@ -610,7 +749,7 @@ export function EvaluationPage() {
           </span>
           <h1>Evaluate answer quality</h1>
           <p>
-            Compare answer models against a ground-truth dataset. Nothing runs
+            Check whether model answers are relevant and complete. Nothing runs
             automatically—you choose the dataset, models, judge, and timing.
           </p>
         </div>
@@ -629,16 +768,16 @@ export function EvaluationPage() {
           <div className="config-content">
             <div className="config-heading">
               <div>
-                <span>Ground truth</span>
+                <span>Evaluation data</span>
                 <h2>Select an evaluation dataset</h2>
               </div>
               <button
                 type="button"
                 className="text-button"
-                onClick={() => setShowDatasetBuilder((value) => !value)}
+                onClick={toggleDatasetBuilder}
               >
                 {showDatasetBuilder ? <X size={15} /> : <Sparkles size={15} />}
-                {showDatasetBuilder ? 'Close generator' : 'Generate dataset'}
+                {showDatasetBuilder ? 'Close generator' : 'Configure generator'}
               </button>
             </div>
             <label className="field-label" htmlFor="dataset-name">
@@ -687,7 +826,7 @@ export function EvaluationPage() {
                 <span>
                   <strong>Delete {datasetDeleteTarget}.jsonl?</strong>
                   <small>
-                    This permanently removes the generated ground-truth dataset.
+                    This permanently removes the generated evaluation dataset.
                     Ingested source documents are not affected.
                   </small>
                 </span>
@@ -741,9 +880,8 @@ export function EvaluationPage() {
             <div className="dataset-quality-warning" role="note">
               <AlertTriangle size={15} />
               <span>
-                <strong>Dataset quality matters.</strong> If the ground truth is
-                incorrect, invalid, or not representative, the evaluation results
-                will be unreliable and may not be useful.
+                <strong>Dataset quality matters.</strong> Questions must be clear
+                and representative for the evaluation results to be useful.
               </span>
             </div>
           </div>
@@ -788,8 +926,8 @@ export function EvaluationPage() {
                 <ChevronDown size={16} />
               </label>
               <small className="field-help">
-                The judge scores correctness, groundedness, completeness, relevance,
-                and citations.
+                The judge checks whether each answer is relevant to the question
+                and includes all information needed from the retrieved documents.
               </small>
             </div>
             <div className="retrieval-compact-panel">
@@ -830,14 +968,14 @@ export function EvaluationPage() {
       </form>
 
       {showDatasetBuilder && (
-        <section className="dataset-builder">
+        <section className="dataset-builder" ref={datasetBuilderRef}>
           <div className="dataset-builder-heading">
             <div className="builder-icon">
               <FilePlus2 size={20} />
             </div>
             <div>
               <span>Evaluation dataset</span>
-              <h2>Generate ground truth</h2>
+              <h2>Generate evaluation cases</h2>
               <p>
                 The app reads the ingested corpus and creates a balanced,
                 categorized evaluation dataset on demand.
@@ -870,7 +1008,7 @@ export function EvaluationPage() {
               <small>
                 {questionsPerCategory * CATEGORIES.length} questions will be
                 generated from stored ingestion chunks. No generation runs until
-                you select Generate ground truth.
+                you select Generate dataset.
               </small>
             </div>
             <div className="builder-options">
@@ -891,7 +1029,7 @@ export function EvaluationPage() {
                 </div>
               </label>
               <label>
-                <span>Reference model</span>
+                <span>Dataset generator model</span>
                 <select
                   value={referenceProvider}
                   onChange={(event) => setReferenceProvider(event.target.value as Provider)}
@@ -917,8 +1055,8 @@ export function EvaluationPage() {
               <div className="warning-note">
                 <AlertTriangle size={16} />
                 <span>
-                  Generated references and categories require human review.
-                  Incorrect ground truth makes evaluation results unreliable.
+                  Generated questions and categories require human review.
+                  Unclear cases can make evaluation results unreliable.
                 </span>
               </div>
               <button
@@ -932,7 +1070,7 @@ export function EvaluationPage() {
                 }
               >
                 {activeDataset ? <i className="spinner dark" /> : <FilePlus2 size={16} />}
-                {activeDataset ? 'Generating dataset' : 'Generate ground truth'}
+                {activeDataset ? 'Generating dataset' : 'Generate dataset'}
               </button>
             </div>
           </form>
@@ -947,7 +1085,7 @@ export function EvaluationPage() {
       )}
       {datasetStatus.data && (
         <JobProgress
-          label="Ground-truth dataset"
+          label="Evaluation dataset"
           status={datasetStatus.data.status}
           error={datasetStatus.data.error}
         />

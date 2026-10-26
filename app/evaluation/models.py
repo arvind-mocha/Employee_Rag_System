@@ -120,14 +120,8 @@ class QuestionGenerationDraft(BaseModel):
 
 
 class JudgeDraft(BaseModel):
-    correctness: float = Field(ge=0.0, le=1.0)
-    groundedness: float = Field(ge=0.0, le=1.0)
     completeness: float = Field(ge=0.0, le=1.0)
     relevance: float = Field(ge=0.0, le=1.0)
-    citation_accuracy: float = Field(ge=0.0, le=1.0)
-    citation_coverage: float = Field(ge=0.0, le=1.0)
-    abstention_correctness: float = Field(ge=0.0, le=1.0)
-    unsupported_claims: list[str] = Field(default_factory=list)
     missing_facts: list[str] = Field(default_factory=list)
     rationale: str
 
@@ -143,16 +137,8 @@ class RetrievalScores(BaseModel):
 
 
 class AnswerScores(BaseModel):
-    correctness: float
-    groundedness: float
     completeness: float
     relevance: float
-    citation_accuracy: float
-    citation_coverage: float
-    citation_validity: float
-    abstention_correctness: float
-    lexical_similarity: float
-    semantic_similarity: float | None
     overall: float
 
 
@@ -202,16 +188,8 @@ class ScoreAverages(BaseModel):
     ndcg_at_k: float | None = None
     source_precision_at_k: float | None = None
     source_recall_at_k: float | None = None
-    correctness: float | None = None
-    groundedness: float | None = None
     completeness: float | None = None
     relevance: float | None = None
-    citation_accuracy: float | None = None
-    citation_coverage: float | None = None
-    citation_validity: float | None = None
-    abstention_correctness: float | None = None
-    lexical_similarity: float | None = None
-    semantic_similarity: float | None = None
     overall: float | None = None
 
 

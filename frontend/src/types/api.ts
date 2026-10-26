@@ -1,4 +1,4 @@
-export type Provider = 'huggingface' | 'openai' | 'anthropic' | 'grok'
+export type Provider = 'gemini' | 'openai' | 'anthropic' | 'grok'
 
 export interface ProviderCredential {
   provider: Provider
@@ -77,6 +77,11 @@ export interface RetrievedChunk {
   chunk_index: number | null
 }
 
+export interface ConversationTurn {
+  question: string
+  answer: string
+}
+
 export interface LlmUsage {
   input_tokens: number
   cached_input_tokens: number
@@ -108,7 +113,8 @@ export interface LlmUsageSummary {
 
 export interface AnswerRequest extends RetrievalOptions {
   question: string
-  hf: boolean
+  history: ConversationTurn[]
+  gemini: boolean
   openai: boolean
   anthropic: boolean
   grok: boolean
@@ -134,30 +140,14 @@ export interface ScoreAverages {
   ndcg_at_k: number | null
   source_precision_at_k: number | null
   source_recall_at_k: number | null
-  correctness: number | null
-  groundedness: number | null
   completeness: number | null
   relevance: number | null
-  citation_accuracy: number | null
-  citation_coverage: number | null
-  citation_validity: number | null
-  abstention_correctness: number | null
-  lexical_similarity: number | null
-  semantic_similarity: number | null
   overall: number | null
 }
 
 export interface AnswerScores {
-  correctness: number
-  groundedness: number
   completeness: number
   relevance: number
-  citation_accuracy: number
-  citation_coverage: number
-  citation_validity: number
-  abstention_correctness: number
-  lexical_similarity: number
-  semantic_similarity: number | null
   overall: number
 }
 

@@ -16,7 +16,7 @@ estimated model cost.
 - LLM-directed knowledge search that skips retrieval for general questions
 - Query rewriting, reranking, and source diversification
 - Grounded answers with retrieved sources
-- Hugging Face, OpenAI, Anthropic, and xAI Grok support
+- Google Gemini, OpenAI, Anthropic, and xAI Grok support
 - Encrypted API-key storage with automatic expiry
 - End-to-end RAG evaluation and provider comparison
 - Token usage, approximate cost, and latency reporting
@@ -84,7 +84,7 @@ flowchart TB
 | Embeddings | Sentence Transformers | Local document and query embeddings |
 | Parsing | PyPDF, python-docx, openpyxl | PDF, DOCX, and XLSX extraction |
 | Security | AES-256-GCM through `cryptography` | API-key encryption at rest |
-| Infrastructure | Docker Compose | Persistent PostgreSQL/PGVector and Redis services |
+| Infrastructure | Docker Compose, Nginx | Containerized frontend, API, worker, PGVector, and Redis |
 | Testing | pytest, ESLint, TypeScript | Backend and frontend validation |
 
 The default embedding model is
@@ -99,7 +99,7 @@ The default embedding model is
 | [API reference](docs/api.md) | Endpoint catalog, request examples, statuses, and limits |
 | [RAG evaluation](docs/evaluation.md) | Dataset creation, review workflow, metrics, pass rules, and jobs |
 | [Security](docs/security.md) | Credential encryption, data handling, trust boundaries, and hardening |
-| [Deployment](docs/deployment.md) | Current Compose scope, production topology, persistence, and operations |
+| [Deployment](docs/deployment.md) | Full-stack Compose deployment, persistence, scaling, and operations |
 | [Troubleshooting](docs/troubleshooting.md) | Common startup, ingestion, provider, and evaluation problems |
 
 ## Quick start
@@ -107,43 +107,53 @@ The default embedding model is
 ### Prerequisites
 
 - Docker with Docker Compose
-- Python 3.12 or newer
-- [uv](https://docs.astral.sh/uv/)
-- Node.js 20 or newer with npm
 - An API key for at least one supported LLM provider
 
-No `.env` file is required. Application defaults are stored in
+Python, uv, and Node.js are only required when running development processes
+outside Docker. No `.env` file is required. Application defaults are stored in
 `app/api/config.py`; API keys and model names are entered through the UI.
 
-### 1. Install the backend and start infrastructure
+### 1. Build and start the complete application
 
 From the repository root:
 
 ```bash
-uv sync
-npm --prefix frontend install
-docker compose up -d
+docker compose up --build -d
 docker compose ps
 ```
 
-Wait for PostgreSQL/PGVector and Redis to report healthy.
+Compose starts the Nginx frontend, FastAPI RAG API, RQ evaluation worker,
+PostgreSQL/PGVector, and Redis. Wait for the dependency downloads and health
+checks to finish on the first build.
 
-### 2. Start the frontend, API, and worker
+Open `http://localhost:5173`. The API is also available directly at
+`http://localhost:8000/api/v1`, with interactive documentation at
+`http://localhost:8000/docs`.
 
-From the repository root, start all three development processes with one
-command:
+Follow startup logs with:
 
 ```bash
+docker compose logs -f api worker frontend
+```
+
+Uploaded source files, processed files, evaluation datasets, and the credential
+encryption key are bind-mounted from the repository. Database, Redis, and the
+Hugging Face model cache use persistent Docker volumes.
+
+### 2. Optional local development processes
+
+To run application code outside Docker while keeping only PostgreSQL and Redis
+containerized, install Python 3.12, uv, and Node.js 20 or newer, then run:
+
+```bash
+uv sync
+npm --prefix frontend install
+docker compose up -d pgvector redis
 npx concurrently --kill-others \
   "uv run uvicorn app.api.main:app --reload" \
   "uv run employee-rag-worker" \
   "npm --prefix frontend run dev"
 ```
-
-The first run may ask permission to download `concurrently`. Press `Ctrl+C` to
-stop all three processes. Open the frontend at `http://localhost:5173`; the API
-is available at `http://localhost:8000/api/v1`, with interactive documentation
-at `http://localhost:8000/docs`.
 
 To run each process in a separate terminal instead, use the commands below.
 
@@ -182,7 +192,7 @@ Open `http://localhost:5173`.
 ### Configure a model
 
 1. Open **Settings**.
-2. Select Hugging Face, OpenAI, Anthropic, or Grok.
+2. Select Google Gemini, OpenAI, Anthropic, or Grok.
 3. Enter the exact provider model ID and API key.
 4. Choose an expiry period and save the encrypted credential.
 
@@ -217,12 +227,13 @@ longer while the embedding model downloads.
 
 1. Start the evaluation worker.
 2. Open **Evaluation** in Developer mode.
-3. Select **Generate dataset** and choose how many questions to create per
-   category. The worker derives them from the ingested corpus and preserves the
-   supporting source excerpts as ground-truth evidence.
-4. Review machine-generated ground truth.
-5. Select answer providers, a judge provider, and retrieval settings.
-6. Run the evaluation and review the quality dashboard.
+3. Select **Configure generator** and choose how many questions to create per
+   category.
+4. Select **Generate dataset**. The worker derives questions from the ingested
+   corpus and preserves supporting source excerpts as ground-truth evidence.
+5. Review machine-generated ground truth.
+6. Select answer providers, a judge provider, and retrieval settings.
+7. Run the evaluation and review the quality dashboard.
 
 Evaluation includes retrieval metrics, correctness, groundedness, completeness,
 relevance, citation quality, abstention behavior, similarity, latency, token
@@ -241,10 +252,9 @@ records by default.
 - PostgreSQL and Redis use persistent Docker volumes and bind only to localhost
   in the included Compose configuration.
 
-The included `docker-compose.yml` currently starts PostgreSQL/PGVector and
-Redis. The API, worker, and frontend use the commands above. Before exposing the
-application publicly, add authentication, authorization, HTTPS, rate limiting,
-monitoring, backups, and production containers for the application processes.
+The included `docker-compose.yml` starts the complete application on the local
+machine. Before exposing it publicly, add authentication, authorization, HTTPS,
+rate limiting, monitoring, and backups.
 
 ## Development checks
 
@@ -256,11 +266,12 @@ npm run lint
 npm run build
 ```
 
-Stop the local data services with:
+Stop the complete application with:
 
 ```bash
 docker compose down
 ```
 
 Use `docker compose down -v` only when you intentionally want to delete the
-PostgreSQL and Redis volumes.
+PostgreSQL, Redis, and downloaded embedding-model cache volumes. Bind-mounted
+source files, evaluation datasets, and the encryption key are not removed.

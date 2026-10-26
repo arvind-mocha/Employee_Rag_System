@@ -42,7 +42,7 @@ At least one of semantic or keyword search must be enabled.
 | `POST` | `/settings/providers` | `201` | Encrypt and save or replace a credential |
 | `DELETE` | `/settings/providers/{provider}` | `204` | Delete a saved provider credential |
 
-Provider names are `huggingface`, `openai`, `anthropic`, and `grok`.
+Provider names are `gemini`, `openai`, `anthropic`, and `grok`.
 
 ### Evaluation
 
@@ -117,14 +117,14 @@ curl -X POST http://localhost:8000/api/v1/answers/generate \
     "query_rewriting": false,
     "reranking": true,
     "source_diversity": true,
-    "hf": false,
+    "gemini": false,
     "openai": true,
     "anthropic": false,
     "grok": false
   }'
 ```
 
-At most one provider switch may be true. If none is selected, Hugging Face is
+At most one provider switch may be true. If none is selected, Google Gemini is
 the backend default. The configured model must support tool calling. The
 response field `retrieval_used` reports whether the model called
 `search_employee_knowledge`; `sources` and `applied_strategies` are empty when
