@@ -1,4 +1,13 @@
-# Employee RAG System
+# Krag
+
+Krag is fully containerized. From the repository root, run this command to build
+and start the entire application:
+
+```bash
+docker compose up --build -d
+```
+
+Once the services are ready, open <http://localhost:5173>.
 
 A full-stack Retrieval-Augmented Generation (RAG) application for employee and
 company knowledge.

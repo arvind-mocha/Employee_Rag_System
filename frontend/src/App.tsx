@@ -80,10 +80,10 @@ export default function App() {
     <div className="app-shell">
       <header className="topbar">
         <div className="topbar-inner">
-          <NavLink className="brand" to="/" aria-label="Northstar home">
+          <NavLink className="brand" to="/" aria-label="Krag home">
             <BrandMark />
             <span>
-              <strong>Northstar</strong>
+              <strong>Krag</strong>
               <small>Employee knowledge</small>
             </span>
           </NavLink>
