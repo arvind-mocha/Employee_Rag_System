@@ -255,6 +255,9 @@ models/cache/
 node_modules/
 *.tsbuildinfo
 
+# Docker Compose override for local development
+docker-compose.override.yml
+
 # The frontend's source library is code, not Python packaging output.
 !frontend/src/lib/
 !frontend/src/lib/**
