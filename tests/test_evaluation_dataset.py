@@ -16,6 +16,7 @@ from app.evaluation.dataset import (
     snapshot_evidence,
     text_sha256,
     validate_dataset_name,
+    validate_upload_filename,
     write_dataset,
 )
 from app.evaluation.models import (
@@ -60,6 +61,56 @@ def ground_truth_record(evidence=None) -> GroundTruthRecord:
 
 
 class EvaluationDatasetTests(unittest.TestCase):
+    def test_minimal_records_and_optional_metadata_need_no_generated_fields(self):
+        content = json.dumps({
+            "question": "What is the policy?", "reference_answer": "A reference.",
+            "expected_keywords": ["policy"], "metadata": {"team": "HR"},
+            "reference_evidence": [{"content": "A reference.", "source_file": "policy.md"}],
+        }).encode()
+        result = parse_dataset_jsonl(b"\xef\xbb\xbf\n" + content)[0]
+        self.assertEqual(result.id, "line-2")
+        self.assertEqual(result.keywords, ["policy"])
+        self.assertEqual(result.metadata, {"team": "HR"})
+        self.assertEqual(result.relevant_evidence[0].content_sha256, text_sha256("A reference."))
+        self.assertIsNone(result.reference_provider)
+        self.assertIsNone(result.generated_at)
+
+    def test_unanswerable_records_and_contradictions(self):
+        payload = {"question": "Unknown?", "reference_answer": "Not available.", "answerable": False}
+        result = parse_dataset_jsonl(json.dumps(payload).encode())[0]
+        self.assertEqual(result.category, "unanswerable")
+        for extra in [{"required_facts": ["A fact"]},
+                      {"reference_evidence": [{"content": "An answer"}]},
+                      {"answerable": True, "category": "unanswerable"}]:
+            with self.subTest(extra=extra), self.assertRaisesRegex(ValueError, "line 1"):
+                parse_dataset_jsonl(json.dumps({**payload, **extra}).encode())
+
+    def test_duplicate_ids_blank_fields_and_nonstandard_json_are_rejected(self):
+        payload = {"id": "same", "question": "Question?", "reference_answer": "Reference"}
+        for content in [json.dumps(payload) + "\n" + json.dumps(payload),
+                        json.dumps({**payload, "question": "  "}),
+                        json.dumps({**payload, "reference_answer": "  "}),
+                        '{"question":"Q", "reference_answer":"R", "metadata":{"x":NaN}}']:
+            with self.subTest(content=content), self.assertRaisesRegex(ValueError, "line"):
+                parse_dataset_jsonl(content.encode())
+
+    def test_filename_validation_rejects_paths_and_control_characters(self):
+        for name in ["../x.jsonl", "C:\\x.jsonl", "..\\x.jsonl", "x\n.jsonl", ".jsonl"]:
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                validate_upload_filename(name)
+        self.assertEqual(validate_upload_filename("Team policy 2026.jsonl"), "Team policy 2026.jsonl")
+
+    def test_documented_example_is_valid(self):
+        example = Path(__file__).parents[1] / "examples" / "evaluation.jsonl"
+        records = parse_dataset_jsonl(example.read_bytes())
+        self.assertEqual(len(records), 3)
+        self.assertFalse(records[-1].answerable)
+
+    def test_unicode_separators_inside_strings_are_not_jsonl_line_breaks(self):
+        payload = {"question": "A question?", "reference_answer": "First\u2028second\u2029third"}
+        content = json.dumps(payload, ensure_ascii=False).encode() + b"\r\n"
+        self.assertEqual(len(parse_dataset_jsonl(content)), 1)
+
     def test_corpus_fingerprint_ignores_the_derived_evaluation_snapshot(
         self,
     ) -> None:
@@ -81,10 +132,6 @@ class EvaluationDatasetTests(unittest.TestCase):
                 patch(
                     "app.evaluation.dataset.config.STRUCTURED_DATA_DIRECTORY",
                     structured_root,
-                ),
-                patch(
-                    "app.evaluation.dataset.config.EVALUATION_CORPUS_SNAPSHOT_FILE",
-                    snapshot,
                 ),
             ):
                 original = indexed_corpus_fingerprint()

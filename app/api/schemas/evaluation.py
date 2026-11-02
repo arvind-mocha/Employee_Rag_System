@@ -1,11 +1,17 @@
-"""Request and response schemas for on-demand RAG evaluations."""
+"""Request and response schemas for uploaded evaluation datasets."""
+
+from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.api.llm import LLMProvider
-from app.api.llm_usage import LLMUsageSummary
-from app.evaluation.models import EvaluationRun, RetrievalConfiguration
-from app.retrieval.config import RETRIEVAL_SETTINGS
+from app.evaluation.dataset import validate_dataset_name
+from app.evaluation.models import (
+    EvaluationBatchRun,
+    GroundTruthRecord,
+    RetrievalConfiguration,
+)
 
 
 class EvaluationRetrievalRequest(BaseModel):
@@ -33,82 +39,64 @@ class EvaluationRetrievalRequest(BaseModel):
         )
 
 
-class GenerateEvaluationDatasetRequest(EvaluationRetrievalRequest):
-    dataset_name: str
-    questions: list[str] | None = Field(
-        default=None,
-        min_length=1,
-        max_length=100,
-    )
-    questions_per_category: int = Field(default=1, ge=1, le=5)
-    reference_provider: LLMProvider
-    overwrite: bool = False
-
-    @field_validator("questions")
-    @classmethod
-    def validate_questions(
-        cls,
-        questions: list[str] | None,
-    ) -> list[str] | None:
-        if questions is None:
-            return None
-        normalized = [" ".join(question.split()) for question in questions]
-        if any(not question for question in normalized):
-            raise ValueError("questions must not contain blank values")
-        if any(
-            len(question) > RETRIEVAL_SETTINGS.maximum_question_length
-            for question in normalized
-        ):
-            raise ValueError(
-                "questions must not exceed the maximum question length"
-            )
-        return normalized
-
-
-class GenerateEvaluationDatasetResponse(BaseModel):
-    dataset_name: str
-    dataset_file: str
-    dataset_sha256: str
+class EvaluationDatasetMetadata(BaseModel):
+    dataset_id: str
+    filename: str
     record_count: int
-    reference_provider: LLMProvider
-    reference_model: str
-    usage: LLMUsageSummary
-    review_required: bool
-
-
-class UploadEvaluationDatasetResponse(BaseModel):
-    dataset_name: str
-    dataset_file: str
+    size_bytes: int
+    uploaded_at: datetime
+    validation_status: Literal["valid", "invalid"]
+    validation_error: str | None = None
     dataset_sha256: str
-    record_count: int
-    review_required: bool
+
+
+class EvaluationDatasetList(BaseModel):
+    datasets: list[EvaluationDatasetMetadata]
+
+
+class EvaluationDatasetPreview(EvaluationDatasetMetadata):
+    records: list[GroundTruthRecord]
+    offset: int
+    limit: int
+
+
+class DatasetUploadError(BaseModel):
+    filename: str
+    error: str
+
+
+class UploadEvaluationDatasetResponse(EvaluationDatasetList):
+    errors: list[DatasetUploadError] = Field(default_factory=list)
 
 
 class DeleteEvaluationDatasetResponse(BaseModel):
-    dataset_name: str
+    dataset_id: str
     message: str
 
 
 class RunEvaluationRequest(EvaluationRetrievalRequest):
-    dataset_name: str
+    dataset_ids: list[str] = Field(min_length=1, max_length=100)
     answer_providers: list[LLMProvider] = Field(min_length=1, max_length=4)
     judge_provider: LLMProvider
     record_ids: list[str] | None = Field(
-        default=None,
-        min_length=1,
-        max_length=100,
+        default=None, min_length=1, max_length=10_000,
     )
+
+    @field_validator("dataset_ids")
+    @classmethod
+    def valid_dataset_ids(cls, ids: list[str]) -> list[str]:
+        ids = [validate_dataset_name(dataset_id) for dataset_id in ids]
+        if len(set(ids)) != len(ids):
+            raise ValueError("dataset_ids must not contain duplicates")
+        return ids
 
     @field_validator("answer_providers")
     @classmethod
-    def unique_answer_providers(
-        cls,
-        providers: list[LLMProvider],
-    ) -> list[LLMProvider]:
+    def unique_answer_providers(cls, providers: list[LLMProvider]) -> list[LLMProvider]:
         if len(set(providers)) != len(providers):
             raise ValueError("answer_providers must not contain duplicates")
         return providers
 
 
-class RunEvaluationResponse(EvaluationRun):
+class RunEvaluationResponse(EvaluationBatchRun):
     pass

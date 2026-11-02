@@ -13,7 +13,7 @@ from app.api.schemas.evaluation import DeleteEvaluationDatasetResponse
 DELETE_ROUTES = (
     ApiRoute(
         name="delete_evaluation_dataset",
-        path="/evaluations/datasets/{dataset_name}",
+        path="/evaluations/datasets/{dataset_id}",
         endpoint=delete_evaluation_dataset,
         response_model=DeleteEvaluationDatasetResponse,
         status_code=HTTPStatus.OK,

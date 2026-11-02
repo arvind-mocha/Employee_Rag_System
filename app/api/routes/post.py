@@ -5,12 +5,10 @@ from http import HTTPStatus
 from app.api.controllers.answer import answer_question
 from app.api.controllers.data import upload_data
 from app.api.controllers.evaluation import (
-    generate_evaluation_dataset,
     run_evaluation_on_demand,
     upload_evaluation_dataset,
 )
 from app.api.controllers.evaluation_jobs import (
-    enqueue_dataset_generation,
     enqueue_evaluation_run,
 )
 from app.api.controllers.ingestion import start_ingestion
@@ -19,7 +17,6 @@ from app.api.routes.definition import ApiRoute
 from app.api.schemas.answer import AnswerResponse
 from app.api.schemas.data import DataUploadResponse
 from app.api.schemas.evaluation import (
-    GenerateEvaluationDatasetResponse,
     RunEvaluationResponse,
     UploadEvaluationDatasetResponse,
 )
@@ -62,14 +59,6 @@ POST_ROUTES = (
         tags=("answers",),
     ),
     ApiRoute(
-        name="generate_evaluation_dataset",
-        path="/evaluations/datasets/generate",
-        endpoint=generate_evaluation_dataset,
-        response_model=GenerateEvaluationDatasetResponse,
-        status_code=HTTPStatus.CREATED,
-        tags=("evaluations",),
-    ),
-    ApiRoute(
         name="upload_evaluation_dataset",
         path="/evaluations/datasets/upload",
         endpoint=upload_evaluation_dataset,
@@ -83,14 +72,6 @@ POST_ROUTES = (
         endpoint=run_evaluation_on_demand,
         response_model=RunEvaluationResponse,
         status_code=HTTPStatus.OK,
-        tags=("evaluations",),
-    ),
-    ApiRoute(
-        name="enqueue_dataset_generation",
-        path="/evaluations/datasets/generate/async",
-        endpoint=enqueue_dataset_generation,
-        response_model=EvaluationJobAccepted,
-        status_code=HTTPStatus.ACCEPTED,
         tags=("evaluations",),
     ),
     ApiRoute(

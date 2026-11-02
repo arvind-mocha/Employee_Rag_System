@@ -1,334 +1,305 @@
+"""Dataset library, explicit selections, and asynchronous reporting contracts."""
+
 from datetime import datetime, timezone
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from fastapi.testclient import TestClient
 
-from app.api import config
-from app.api.llm import LLMProvider
-from app.api.llm_usage import LLMUsage
 from app.api.main import app
+from app.api.llm import LLMProvider
+from app.api.llm_usage import LLMUsage, summarize_llm_usage
+from app.api.schemas.evaluation import RunEvaluationRequest
+from app.core.redis_client import RedisSettings
+from app.evaluation.dataset import dataset_path
+from app.evaluation.engine import _summary
+from app.evaluation.jobs import run_evaluation_job
 from app.evaluation.models import (
-    EvaluationCategory,
-    EvaluationRun,
-    GeneratedEvaluationQuestion,
-    GroundTruthRecord,
-    RetrievalConfiguration,
+    AnswerScores, EvaluationCaseResult, EvaluationRun, EvaluationTiming,
+    GroundTruthStatus, ReviewStatus,
 )
-from app.evaluation.dataset import evidence_fingerprint
 
 
-def ground_truth_record() -> GroundTruthRecord:
-    return GroundTruthRecord(
-        id="case-1",
-        question="How many vacation days?",
-        answerable=False,
-        reference_answer="The documents do not contain enough information.",
-        required_facts=[],
-        relevant_evidence=[],
-        evidence_fingerprint=evidence_fingerprint([]),
-        generated_at=datetime.now(timezone.utc),
-        reference_provider=LLMProvider.OPENAI,
-        reference_model="reference-model",
-        reference_usage=LLMUsage(
-            input_tokens=100,
-            output_tokens=20,
-            total_tokens=120,
-            token_count_source="provider",
-            estimated_cost_usd=0.004,
-            pricing_source="built_in",
-        ),
-        retrieval=RetrievalConfiguration(),
-    )
+BASE = "/api/v1/evaluations"
+RECORD = {"question": "How many vacation days?", "reference_answer": "15 days annually."}
+
+
+def jsonl(*records):
+    return "\n".join(json.dumps(record) for record in records).encode()
 
 
 class EvaluationApiTests(unittest.TestCase):
-    def setUp(self) -> None:
+    def setUp(self):
+        self.temporary = TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name) / "evaluation_data"
+        self.config = patch("app.api.config.EVALUATION_DATA_DIRECTORY", self.root)
+        self.config.start()
+        self.addCleanup(self.config.stop)
         self.client = TestClient(app)
 
-    def test_deletes_the_named_evaluation_dataset(self) -> None:
-        with TemporaryDirectory() as directory:
-            evaluation_directory = Path(directory)
-            dataset = evaluation_directory / "obsolete-evaluation.jsonl"
-            dataset.write_text("generated ground truth", encoding="utf-8")
-            with patch(
-                "app.api.config.EVALUATION_DATA_DIRECTORY",
-                evaluation_directory,
-            ):
-                response = self.client.delete(
-                    "/api/v1/evaluations/datasets/obsolete-evaluation"
-                )
+    def upload(self, *files):
+        return self.client.post(f"{BASE}/datasets/upload", files=[
+            ("files", (name, content, "application/x-ndjson")) for name, content in files
+        ])
 
+    def dataset(self, filename="policies.jsonl", records=None):
+        response = self.upload((filename, jsonl(*(records or [RECORD]))))
+        self.assertEqual(response.status_code, 201, response.text)
+        return response.json()["datasets"][0]
+
+    def request_run(self, ids, **kwargs):
+        return {"dataset_ids": ids, "answer_providers": ["openai"],
+                "judge_provider": "anthropic", **kwargs}
+
+    @staticmethod
+    def fake_run(dataset_id, records, providers, judge, retrieval, **kwargs):
+        results = []
+        for provider in providers:
+            for record in records:
+                score = record.metadata.get("score", 1.0)
+                usage = LLMUsage(input_tokens=10, output_tokens=5, total_tokens=15,
+                                 token_count_source="provider", estimated_cost_usd=0.01,
+                                 pricing_source="built_in")
+                results.append(EvaluationCaseResult(
+                    record_id=record.id, question=record.question, category=record.category,
+                    reference_answer=record.reference_answer, required_facts=record.required_facts,
+                    review_status=ReviewStatus.USER_PROVIDED,
+                    ground_truth_status=GroundTruthStatus.UNVERIFIABLE,
+                    answer_provider=provider, judge_provider=judge, answer="An answer",
+                    answer_usage=usage, usage=summarize_llm_usage([usage]),
+                    retrieved_chunk_ids=[], retrieved_sources=[],
+                    answer_scores=AnswerScores(completeness=score, relevance=score, overall=score),
+                    passed=score >= 0.8,
+                    timing=EvaluationTiming(retrieval_ms=1, answer_generation_ms=2, grading_ms=3, total_ms=6),
+                ))
+                kwargs["on_case_complete"]()
+        return EvaluationRun(
+            run_id=f"run-{dataset_id}", dataset_name=dataset_id,
+            dataset_sha256=kwargs["content_sha256"], generated_at=datetime.now(timezone.utc),
+            judge_provider=judge, summaries=[_summary(provider, results) for provider in providers],
+            results=results, usage=summarize_llm_usage(result.answer_usage for result in results),
+        )
+
+    def test_single_upload_preserves_original_bytes_and_metadata(self):
+        content = jsonl(RECORD)
+        item = self.dataset()
+        self.assertNotEqual(item["dataset_id"], "policies")
+        self.assertEqual(item["filename"], "policies.jsonl")
+        self.assertEqual(item["record_count"], 1)
+        self.assertEqual(item["size_bytes"], len(content))
+        self.assertEqual(item["validation_status"], "valid")
+        self.assertTrue(item["uploaded_at"])
+        self.assertEqual(dataset_path(item["dataset_id"]).read_bytes(), content)
+        preview = self.client.get(f"{BASE}/datasets/{item['dataset_id']}").json()
+        self.assertEqual(preview["records"][0]["reference_answer"], RECORD["reference_answer"])
+        self.assertEqual(preview["records"][0]["id"], "line-1")
+
+    def test_multiple_and_later_uploads_with_duplicate_names_persist(self):
+        response = self.upload(("same.jsonl", jsonl(RECORD)), ("same.jsonl", jsonl(RECORD)))
+        self.assertEqual(response.status_code, 201)
+        first = response.json()["datasets"]
+        self.assertNotEqual(first[0]["dataset_id"], first[1]["dataset_id"])
+        later = self.dataset("same.jsonl")
+        # A fresh client and disk-only lookup exercise restart persistence.
+        listing = TestClient(app).get(f"{BASE}/datasets").json()["datasets"]
+        self.assertEqual({item["dataset_id"] for item in listing},
+                         {first[0]["dataset_id"], first[1]["dataset_id"], later["dataset_id"]})
+        self.assertEqual(len(list(self.root.glob("*/dataset.jsonl"))), 3)
+
+    def test_individual_deletion_leaves_other_files_intact(self):
+        first, second = self.dataset(), self.dataset()
+        response = self.client.delete(f"{BASE}/datasets/{first['dataset_id']}")
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(
-            response.json()["dataset_name"],
-            "obsolete-evaluation",
-        )
-        self.assertFalse(dataset.exists())
+        remaining = self.client.get(f"{BASE}/datasets").json()["datasets"]
+        self.assertEqual([item["dataset_id"] for item in remaining], [second["dataset_id"]])
+        self.assertEqual(self.client.delete(f"{BASE}/datasets/{first['dataset_id']}").status_code, 404)
 
-    def test_returns_not_found_when_deleting_a_missing_dataset(self) -> None:
-        with TemporaryDirectory() as directory:
-            with patch(
-                "app.api.config.EVALUATION_DATA_DIRECTORY",
-                Path(directory),
-            ):
-                response = self.client.delete(
-                    "/api/v1/evaluations/datasets/missing-evaluation"
-                )
+    def test_invalid_files_report_line_numbers_without_partial_storage(self):
+        for content in [jsonl(RECORD) + b'\n{broken}', jsonl(RECORD, {"question": "Missing reference"}),
+                        jsonl(RECORD) + b'\n[]']:
+            with self.subTest(content=content):
+                response = self.upload(("invalid.jsonl", content))
+                self.assertEqual(response.status_code, 422)
+                self.assertIn("line 2", response.json()["detail"])
+                self.assertFalse(self.root.exists())
 
-        self.assertEqual(response.status_code, 404)
+    def test_mixed_batch_keeps_valid_file_and_reports_invalid_file(self):
+        response = self.upload(("valid.jsonl", jsonl(RECORD)), ("bad.jsonl", b'{}'))
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(len(response.json()["datasets"]), 1)
+        self.assertIn("line 1", response.json()["errors"][0]["error"])
+        self.assertEqual(len(self.client.get(f"{BASE}/datasets").json()["datasets"]), 1)
 
-    def test_rejects_an_invalid_dataset_name_during_deletion(self) -> None:
-        response = self.client.delete(
-            "/api/v1/evaluations/datasets/invalid.name"
-        )
+    def test_rejects_bad_encodings_empty_files_and_unsafe_filenames(self):
+        for filename, content in [("x.jsonl", b'\xff'), ("x.jsonl", b'\n'),
+                                  ("../secret.jsonl", jsonl(RECORD)),
+                                  ("..\\secret.jsonl", jsonl(RECORD)),
+                                  ("x.json", jsonl(RECORD))]:
+            with self.subTest(filename=filename, content=content):
+                self.assertEqual(self.upload((filename, content)).status_code, 422)
+        self.assertFalse(self.root.exists())
 
+    def test_enforces_configured_size_record_and_batch_limits(self):
+        with patch("app.api.config.MAX_EVALUATION_DATASET_SIZE", 5):
+            self.assertEqual(self.upload(("large.jsonl", jsonl(RECORD))).status_code, 422)
+        with patch("app.api.config.MAX_EVALUATION_RECORDS", 1):
+            response = self.upload(("many.jsonl", jsonl(RECORD, RECORD)))
+            self.assertEqual(response.status_code, 422)
+            self.assertIn("line 2", response.json()["detail"])
+        with patch("app.api.config.MAX_EVALUATION_UPLOAD_FILES", 1):
+            self.assertEqual(self.upload(("a.jsonl", jsonl(RECORD)),
+                                         ("b.jsonl", jsonl(RECORD))).status_code, 422)
+        self.assertFalse(self.root.exists())
+
+    def test_legacy_single_file_field_and_existing_disk_files_are_supported(self):
+        response = self.client.post(f"{BASE}/datasets/upload", files={
+            "dataset_file": ("legacy-field.jsonl", jsonl(RECORD), "application/x-ndjson"),
+        })
+        self.assertEqual(response.status_code, 201)
+        (self.root / "old-dataset.jsonl").write_bytes(jsonl(RECORD))
+        listing = self.client.get(f"{BASE}/datasets").json()["datasets"]
+        self.assertIn("old-dataset", [item["dataset_id"] for item in listing])
+
+    def test_deleting_legacy_file_named_dataset_preserves_library(self):
+        item = self.dataset()
+        (self.root / "dataset.jsonl").write_bytes(jsonl(RECORD))
+        response = self.client.delete(f"{BASE}/datasets/dataset")
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(self.root.is_dir())
+        self.assertTrue(dataset_path(item["dataset_id"]).is_file())
+
+    def test_preview_paginates_and_marks_tampered_files_invalid(self):
+        item = self.dataset(records=[{**RECORD, "id": str(i)} for i in range(25)])
+        preview = self.client.get(f"{BASE}/datasets/{item['dataset_id']}?offset=20&limit=20").json()
+        self.assertEqual(len(preview["records"]), 5)
+        dataset_path(item["dataset_id"]).write_bytes(b'bad json')
+        listing = self.client.get(f"{BASE}/datasets").json()["datasets"]
+        self.assertEqual(listing[0]["validation_status"], "invalid")
+        with patch("app.api.controllers.evaluation.run_evaluation") as run:
+            response = self.client.post(f"{BASE}/run", json=self.request_run([item["dataset_id"]]))
         self.assertEqual(response.status_code, 422)
+        run.assert_not_called()
 
-    @patch(
-        "app.api.controllers.evaluation.dataset_sha256",
-        return_value="a" * 64,
-    )
-    @patch("app.api.controllers.evaluation.write_dataset")
-    @patch("app.api.controllers.evaluation.generate_ground_truth_records")
-    def test_generates_jsonl_only_when_endpoint_is_called(
-        self,
-        generate_records,
-        write_dataset,
-        _dataset_hash,
-    ) -> None:
-        generate_records.return_value = [ground_truth_record()]
-        write_dataset.return_value = (
-            config.EVALUATION_DATA_DIRECTORY / "employee-policies.jsonl"
-        )
+    def test_generation_routes_are_removed(self):
+        for suffix in ["/datasets/generate", "/datasets/generate/async"]:
+            self.assertIn(self.client.post(BASE + suffix, json={}).status_code, [404, 405])
+        self.assertNotIn("/api/v1/evaluations/datasets/generate", app.openapi()["paths"])
 
-        response = self.client.post(
-            "/api/v1/evaluations/datasets/generate",
-            json={
-                "dataset_name": "employee-policies",
-                "questions": ["How many vacation days?"],
-                "reference_provider": "openai",
-            },
-        )
+    def test_requires_explicit_unique_selection_and_providers(self):
+        for overrides in [{"dataset_ids": []}, {"dataset_ids": ["a", "a"]},
+                          {"dataset_ids": ["../secret"]},
+                          {"answer_providers": ["openai", "openai"]},
+                          {"semantic_search": False, "keyword_search": False}]:
+            payload = self.request_run(["a"], **{k: v for k, v in overrides.items() if k != "dataset_ids"})
+            payload.update(overrides)
+            self.assertEqual(self.client.post(f"{BASE}/run", json=payload).status_code, 422)
 
-        self.assertEqual(response.status_code, 201)
-        self.assertTrue(response.json()["review_required"])
-        self.assertEqual(response.json()["record_count"], 1)
-        self.assertEqual(response.json()["usage"]["llm_calls"], 1)
-        self.assertEqual(response.json()["usage"]["estimated_cost_usd"], 0.004)
-        generate_records.assert_called_once()
+    @patch("app.api.controllers.evaluation.run_evaluation", side_effect=fake_run)
+    def test_single_dataset_evaluates_only_selected_file(self, run):
+        first, _unselected = self.dataset(), self.dataset("unselected.jsonl")
+        response = self.client.post(f"{BASE}/run", json=self.request_run([first["dataset_id"]], reranking=True))
+        self.assertEqual(response.status_code, 200, response.text)
+        run.assert_called_once()
+        self.assertEqual(run.call_args.args[0], first["dataset_id"])
+        self.assertTrue(run.call_args.args[4].reranking)
+        self.assertEqual(response.json()["datasets"][0]["dataset_id"], first["dataset_id"])
+        self.assertEqual(response.json()["aggregate"]["results"][0]["dataset_id"], first["dataset_id"])
 
-    @patch(
-        "app.api.controllers.evaluation.generate_evaluation_questions"
-    )
-    @patch("app.api.controllers.evaluation.dataset_sha256", return_value="a" * 64)
-    @patch("app.api.controllers.evaluation.write_dataset")
-    @patch("app.api.controllers.evaluation.generate_ground_truth_records")
-    def test_generates_questions_from_ingested_data_on_demand(
-        self,
-        generate_records,
-        write_dataset,
-        _dataset_hash,
-        generate_questions,
-    ) -> None:
-        generated = [
-            GeneratedEvaluationQuestion(
-                question=f"Question for {category.value}?",
-                category=category,
-                relevant_evidence_numbers=(
-                    []
-                    if category is EvaluationCategory.UNANSWERABLE
-                    else [1]
-                ),
-            )
-            for category in EvaluationCategory
-        ]
-        generate_questions.return_value = (
-            generated,
-            [
-                LLMUsage(
-                    input_tokens=200,
-                    output_tokens=100,
-                    total_tokens=300,
-                    token_count_source="provider",
-                    estimated_cost_usd=0.01,
-                    pricing_source="built_in",
-                )
-            ],
-            {},
-        )
-        generate_records.return_value = [ground_truth_record()]
-        write_dataset.return_value = (
-            config.EVALUATION_DATA_DIRECTORY / "auto-evaluation.jsonl"
-        )
-
-        response = self.client.post(
-            "/api/v1/evaluations/datasets/generate",
-            json={
-                "dataset_name": "auto-evaluation",
-                "questions_per_category": 1,
-                "reference_provider": "openai",
-            },
-        )
-
-        self.assertEqual(response.status_code, 201)
-        generate_questions.assert_called_once_with(LLMProvider.OPENAI, 1)
-        call = generate_records.call_args
-        self.assertEqual(len(call.args[0]), len(EvaluationCategory))
-        self.assertEqual(
-            set(call.kwargs["category_hints"].values()),
-            set(EvaluationCategory),
-        )
-        self.assertEqual(call.kwargs["evidence_hints"], {})
-        self.assertEqual(response.json()["usage"]["llm_calls"], 2)
+    @patch("app.api.controllers.evaluation.run_evaluation", side_effect=fake_run)
+    def test_multiple_datasets_have_independent_and_weighted_aggregate_results(self, run):
+        first = self.dataset("same.jsonl")
+        second = self.dataset("same.jsonl", records=[
+            {**RECORD, "metadata": {"score": 0.0}}, {**RECORD, "metadata": {"score": 0.0}},
+        ])
+        unselected = self.dataset("unselected.jsonl")
+        response = self.client.post(f"{BASE}/run", json=self.request_run([first["dataset_id"], second["dataset_id"]]))
+        self.assertEqual(response.status_code, 200, response.text)
+        batch = response.json()
+        self.assertEqual(run.call_count, 2)
+        self.assertNotIn(unselected["dataset_id"], [call.args[0] for call in run.call_args_list])
+        self.assertEqual(len(batch["datasets"]), 2)
+        self.assertEqual(batch["datasets"][0]["summaries"][0]["passed"], 1)
+        self.assertEqual(batch["datasets"][1]["summaries"][0]["failed"], 2)
+        aggregate = batch["aggregate"]
+        self.assertAlmostEqual(aggregate["summaries"][0]["average_scores"]["overall"], 1 / 3)
+        self.assertEqual(aggregate["usage"]["total_tokens"], 45)
+        self.assertAlmostEqual(aggregate["usage"]["estimated_cost_usd"], 0.03)
+        self.assertEqual({item["dataset_id"] for item in aggregate["results"]},
+                         {first["dataset_id"], second["dataset_id"]})
+        # A subsequent run uses its new selection, with a fresh batch ID.
+        later = self.client.post(f"{BASE}/run", json=self.request_run([second["dataset_id"]])).json()
+        self.assertNotEqual(later["run_id"], batch["run_id"])
+        self.assertEqual(len(later["aggregate"]["results"]), 2)
 
     @patch("app.api.controllers.evaluation.run_evaluation")
-    @patch("app.api.controllers.evaluation.read_dataset")
-    def test_runs_selected_providers_on_demand(
-        self,
-        read_dataset,
-        run_evaluation,
-    ) -> None:
-        read_dataset.return_value = [ground_truth_record()]
-        run_evaluation.return_value = EvaluationRun(
-            run_id="run-1",
-            dataset_name="employee-policies",
-            dataset_sha256="b" * 64,
-            generated_at=datetime.now(timezone.utc),
-            judge_provider=LLMProvider.OPENAI,
-            summaries=[],
-            results=[],
-        )
+    def test_checks_all_selected_files_before_running_any(self, run):
+        item = self.dataset()
+        response = self.client.post(f"{BASE}/run", json=self.request_run([item["dataset_id"], "missing"]))
+        self.assertEqual(response.status_code, 404)
+        run.assert_not_called()
 
-        response = self.client.post(
-            "/api/v1/evaluations/run",
-            json={
-                "dataset_name": "employee-policies",
-                "answer_providers": ["anthropic", "grok"],
-                "judge_provider": "openai",
-                "reranking": True,
-            },
-        )
-
+    @patch("app.api.controllers.evaluation.run_evaluation", side_effect=fake_run)
+    def test_record_id_filters_are_scoped_to_each_selected_file(self, run):
+        item = self.dataset(records=[{**RECORD, "id": "one"}, {**RECORD, "id": "two"}])
+        response = self.client.post(f"{BASE}/run", json=self.request_run(
+            [item["dataset_id"]], record_ids=["two"],
+        ))
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["run_id"], "run-1")
-        self.assertEqual(response.json()["usage"]["llm_calls"], 0)
-        providers = run_evaluation.call_args.args[2]
-        self.assertEqual(
-            providers,
-            [LLMProvider.ANTHROPIC, LLMProvider.GROK],
-        )
+        self.assertEqual([record.id for record in run.call_args.args[1]], ["two"])
+        run.reset_mock()
+        response = self.client.post(f"{BASE}/run", json=self.request_run(
+            [item["dataset_id"]], record_ids=["missing"],
+        ))
+        self.assertEqual(response.status_code, 404)
+        run.assert_not_called()
 
-    def test_rejects_duplicate_answer_providers(self) -> None:
-        response = self.client.post(
-            "/api/v1/evaluations/run",
-            json={
-                "dataset_name": "employee-policies",
-                "answer_providers": ["openai", "openai"],
-                "judge_provider": "anthropic",
-            },
-        )
+    @patch("app.api.controllers.evaluation_jobs.get_redis_settings", return_value=RedisSettings())
+    @patch("app.api.controllers.evaluation_jobs.get_evaluation_queue")
+    @patch("app.api.controllers.evaluation.run_evaluation", side_effect=fake_run)
+    def test_async_payload_selection_progress_and_changed_dataset_protection(self, run, queue, _settings):
+        first = self.dataset()
+        self.dataset("unselected.jsonl")
+        queue.return_value.enqueue_call.return_value = Mock(id="job-1")
+        response = self.client.post(f"{BASE}/run/async", json=self.request_run([first["dataset_id"]]))
+        self.assertEqual(response.status_code, 202, response.text)
+        call = queue.return_value.enqueue_call.call_args
+        self.assertEqual(call.kwargs["func"], "app.evaluation.jobs.run_evaluation_job")
+        payload = call.kwargs["args"][0]
+        self.assertEqual(payload["dataset_ids"], [first["dataset_id"]])
+        self.assertEqual(payload["expected_hashes"], {first["dataset_id"]: first["dataset_sha256"]})
+        job = Mock(meta={})
+        with patch("app.evaluation.jobs.get_current_job", return_value=job):
+            result = run_evaluation_job(payload)
+        self.assertTrue(result["ok"])
+        self.assertEqual(job.meta["completed_cases"], 1)
+        self.assertEqual(job.meta["total_cases"], 1)
+        self.assertEqual(run.call_args.args[0], first["dataset_id"])
+        run.reset_mock()
+        dataset_path(first["dataset_id"]).write_bytes(jsonl({**RECORD, "reference_answer": "Changed"}))
+        with patch("app.evaluation.jobs.get_current_job", return_value=None):
+            changed = run_evaluation_job(payload)
+        self.assertFalse(changed["ok"])
+        self.assertIn("changed after selection", changed["error"])
+        run.assert_not_called()
+        dataset_path(first["dataset_id"]).unlink()
+        with patch("app.evaluation.jobs.get_current_job", return_value=None):
+            deleted = run_evaluation_job(payload)
+        self.assertFalse(deleted["ok"])
+        self.assertIn("not found", deleted["error"])
+        run.assert_not_called()
 
-        self.assertEqual(response.status_code, 422)
-
-    def test_uploads_a_valid_jsonl_dataset_under_the_requested_name(self) -> None:
-        with TemporaryDirectory() as directory:
-            project_root = Path(directory)
-            evaluation_directory = project_root / "evaluation_data"
-            content = ground_truth_record().model_dump_json().encode("utf-8")
-            with (
-                patch("app.api.config.PROJECT_ROOT", project_root),
-                patch(
-                    "app.api.config.EVALUATION_DATA_DIRECTORY",
-                    evaluation_directory,
-                ),
-            ):
-                response = self.client.post(
-                    "/api/v1/evaluations/datasets/upload",
-                    data={"dataset_name": "team-baseline"},
-                    files={
-                        "dataset_file": (
-                            "original.jsonl",
-                            content,
-                            "application/x-ndjson",
-                        )
-                    },
-                )
-
-            self.assertEqual(response.status_code, 201)
-            self.assertEqual(response.json()["dataset_name"], "team-baseline")
-            self.assertEqual(response.json()["record_count"], 1)
-            self.assertTrue(response.json()["review_required"])
-            self.assertTrue(
-                (evaluation_directory / "team-baseline.jsonl").is_file()
-            )
-
-    def test_upload_uses_the_jsonl_filename_when_name_is_omitted(self) -> None:
-        with TemporaryDirectory() as directory:
-            project_root = Path(directory)
-            evaluation_directory = project_root / "evaluation_data"
-            content = ground_truth_record().model_dump_json().encode("utf-8")
-            with (
-                patch("app.api.config.PROJECT_ROOT", project_root),
-                patch(
-                    "app.api.config.EVALUATION_DATA_DIRECTORY",
-                    evaluation_directory,
-                ),
-            ):
-                response = self.client.post(
-                    "/api/v1/evaluations/datasets/upload",
-                    files={
-                        "dataset_file": (
-                            "benefits-tests.jsonl",
-                            content,
-                            "application/x-ndjson",
-                        )
-                    },
-                )
-
-            self.assertEqual(response.status_code, 201)
-            self.assertEqual(response.json()["dataset_name"], "benefits-tests")
-
-    def test_rejects_an_invalid_uploaded_dataset_without_storing_it(self) -> None:
-        with TemporaryDirectory() as directory:
-            project_root = Path(directory)
-            evaluation_directory = project_root / "evaluation_data"
-            with (
-                patch("app.api.config.PROJECT_ROOT", project_root),
-                patch(
-                    "app.api.config.EVALUATION_DATA_DIRECTORY",
-                    evaluation_directory,
-                ),
-            ):
-                response = self.client.post(
-                    "/api/v1/evaluations/datasets/upload",
-                    files={
-                        "dataset_file": (
-                            "broken.jsonl",
-                            b'{"question": "Missing ground truth fields"}\n',
-                            "application/x-ndjson",
-                        )
-                    },
-                )
-
-            self.assertEqual(response.status_code, 422)
-            self.assertFalse(evaluation_directory.exists())
-
-    def test_rejects_a_non_jsonl_dataset_upload(self) -> None:
-        response = self.client.post(
-            "/api/v1/evaluations/datasets/upload",
-            files={
-                "dataset_file": (
-                    "dataset.json",
-                    b"{}",
-                    "application/json",
-                )
-            },
-        )
-
-        self.assertEqual(response.status_code, 415)
+    def test_rejects_symlink_escape(self):
+        self.root.mkdir()
+        outside = Path(self.temporary.name) / "outside.jsonl"
+        outside.write_bytes(jsonl(RECORD))
+        (self.root / "escape.jsonl").symlink_to(outside)
+        self.assertEqual(self.client.get(f"{BASE}/datasets/escape").status_code, 422)
+        self.assertEqual(self.client.delete(f"{BASE}/datasets/escape").status_code, 422)
+        self.assertTrue(outside.exists())
 
 
 if __name__ == "__main__":

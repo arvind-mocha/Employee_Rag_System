@@ -40,7 +40,6 @@ explicit = true
 [project.scripts]
 employee-rag-system = "app.api.main:main"
 employee-rag-ingest = "app.ingestion.ingest:main"
-employee-rag-generate-eval = "app.evaluation.jsonl_generator:main"
 employee-rag-worker = "app.api.worker:main"
 
 [build-system]

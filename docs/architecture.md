@@ -60,8 +60,8 @@ flowchart TB
 | Ingestion pipeline | Text extraction, normalization, chunking, metadata creation, embeddings, and indexing |
 | Query router | Semantic and keyword search selection, hybrid fusion, rewriting, reranking, and source diversity |
 | LLM layer | Provider selection, knowledge-search tool choice, grounded prompting, upstream error handling, usage, and cost calculation |
-| Evaluation engine | Ground-truth generation, freshness checks, answer comparison, judging, and aggregation |
-| RQ worker | Executes asynchronous dataset-generation and evaluation jobs |
+| Evaluation engine | Uploaded dataset validation, freshness checks, answer comparison, judging, and aggregation |
+| RQ worker | Executes asynchronous evaluation jobs for explicitly selected dataset IDs |
 | PostgreSQL/PGVector | Vectors, chunk metadata, full-text retrieval data, and encrypted provider credentials |
 | Redis | Distributed ingestion lock, persistent ingestion status, job queues, and temporary evaluation results |
 | Local filesystem | Uploaded source files, cleaned intermediate data, evaluation JSONL, and the installation key |
@@ -141,15 +141,16 @@ ingest chat messages. Each answer request is processed independently.
 
 ## Evaluation flow
 
-1. A developer requests ground-truth generation. The worker derives balanced
-   questions from artifacts retained by ingestion; JSONL persistence is internal
-   to the application.
-2. Asynchronous requests are placed on the Redis evaluation queue.
-3. The RQ worker retrieves evidence, calls the selected answer providers, and
-   calls the chosen judge provider.
-4. Deterministic retrieval, citation, similarity, timing, usage, and cost
-   metrics are combined with judge scores.
-5. The result is stored temporarily with the Redis job and polled by the UI.
+1. A developer uploads JSONL files with questions and reference answers. Each file
+   is validated, assigned a stable ID, and atomically persisted with metadata.
+2. The developer selects dataset IDs and provider/retrieval settings. Asynchronous
+   requests carry the selected IDs and content hashes onto the Redis queue.
+3. The RQ worker validates all selections, retrieves evidence, calls the selected
+   answer providers, and calls the chosen judge. It reports per-case progress.
+4. Retrieval, citation, similarity, timing, usage, and cost metrics are combined
+   with judge scores. Retrieval metrics remain unavailable without reference evidence.
+5. Independent per-file runs and a case-weighted aggregate are stored with the
+   Redis job and polled by the UI. Dataset IDs accompany every result.
 
 Evaluation does not run automatically during ingestion, retrieval, or normal
 answer requests.
@@ -163,7 +164,7 @@ answer requests.
 | `data/` | Uploaded unstructured source files | Local filesystem; ignored by Git |
 | `structured_data/` | Uploaded structured source files | Local filesystem; ignored by Git |
 | `temp_data/` | Cleaned intermediate Markdown | Local filesystem; ignored by Git |
-| `evaluation_data/` | Generated evaluation JSONL | Local filesystem; ignored by Git |
+| `evaluation_data/` | Uploaded evaluation JSONL and per-file metadata | Local filesystem; ignored by Git |
 | `.secrets/` | Local credential encryption key | Local filesystem; ignored by Git |
 
 For container or multi-instance deployment, local data paths must be backed by

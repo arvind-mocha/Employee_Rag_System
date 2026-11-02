@@ -162,10 +162,11 @@ queue.
 - Verify answer and judge provider credentials.
 - Review worker logs for provider or retrieval failures.
 - Confirm the dataset still exists in `evaluation_data/`.
-- Regenerate and review ground truth after changing the indexed corpus.
+- Review and upload revised reference files after changing the indexed corpus.
 - Remember that asynchronous job results expire after the configured result TTL.
 
-Stale records are not counted as passes or failures.
+Freshness warnings accompany scores; inspect stale references before interpreting results.
+Missing reference evidence produces unavailable retrieval metrics, rather than fabricated scores.
 
 ## Frontend dependencies or build fail
 

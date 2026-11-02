@@ -1,7 +1,6 @@
-"""Ground-truth generation and on-demand RAG evaluation engine."""
+"""On-demand RAG evaluation of user-provided reference datasets."""
 
-from collections import Counter, defaultdict
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable
 from datetime import datetime, timezone
 import json
 from statistics import fmean
@@ -12,6 +11,9 @@ from uuid import uuid4
 from pydantic import ValidationError
 
 from app.api.answer_metrics import (
+    citation_validity,
+    lexical_similarity,
+    semantic_similarity,
     overall_answer_score,
 )
 from app.api.llm import (
@@ -22,53 +24,22 @@ from app.api.llm import (
     invoke_chat_model,
 )
 from app.api.llm_usage import LLMUsage, summarize_llm_usage
-from app.api import config
-from app.evaluation.dataset import (
-    dataset_sha256,
-    evidence_fingerprint,
-    ground_truth_status,
-    indexed_corpus_fingerprint,
-    snapshot_evidence,
-    text_sha256,
-)
+from app.evaluation.dataset import dataset_sha256, ground_truth_status, text_sha256
 from app.evaluation.models import (
     AnswerScores,
-    EvaluationCategory,
     EvaluationCaseResult,
     EvaluationRun,
     EvaluationTiming,
     GroundTruthRecord,
     GroundTruthStatus,
-    GeneratedEvaluationQuestion,
     JudgeDraft,
     ProviderEvaluationSummary,
-    ReferenceDraft,
-    QuestionGenerationDraft,
     RetrievalConfiguration,
     RetrievalScores,
     ReviewStatus,
     ScoreAverages,
 )
-from app.evaluation.prompts import (
-    build_judge_messages,
-    build_question_generation_messages,
-    build_reference_messages,
-)
-from app.ingestion.chunker import (
-    DocumentChunk,
-    chunk_documents,
-    chunk_structured_data,
-)
-from app.ingestion.ingest import (
-    CHUNK_OVERLAP,
-    CHUNK_SIZE,
-    CHUNKING_BATCH_SIZE,
-    MAX_WORKERS,
-)
-from app.ingestion.evaluation_snapshot import (
-    read_evaluation_corpus_snapshot,
-    write_evaluation_corpus_snapshot,
-)
+from app.evaluation.prompts import build_judge_messages
 from app.retrieval.config import RETRIEVAL_SETTINGS
 from app.retrieval.models import RetrievedChunk
 from app.retrieval.query_router import QueryRouter, RetrievalOptions, get_query_router
@@ -76,18 +47,11 @@ from app.retrieval.retrieval_metrics import evaluate_retrieval
 
 
 PASS_THRESHOLD = 0.80
-QUESTION_CONTEXT_MAX_CHUNKS = 24
-QUESTION_CONTEXT_MAX_CHARACTERS = 16_000
-QUESTION_GENERATION_CATEGORY_BATCH_SIZE = 3
-QUESTION_GENERATION_BASE_OUTPUT_TOKENS = 512
-QUESTION_GENERATION_OUTPUT_TOKENS_PER_QUESTION = 128
-QUESTION_GENERATION_MAX_OUTPUT_TOKENS = 8_192
-REFERENCE_GENERATION_MAX_OUTPUT_TOKENS = 4_096
 JUDGE_GENERATION_MAX_OUTPUT_TOKENS = 4_096
 
 
 class EvaluationOutputError(ValueError):
-    """Raised when a generator or judge returns invalid structured output."""
+    """Raised when a judge returns invalid structured output."""
 
 
 def _retrieval_options(
@@ -116,30 +80,6 @@ def _parse_json_object(text: str) -> dict[str, Any]:
     return value
 
 
-def _reference_draft(text: str) -> ReferenceDraft:
-    try:
-        draft = ReferenceDraft.model_validate(_parse_json_object(text))
-    except ValidationError as error:
-        raise EvaluationOutputError(
-            "the reference model returned an invalid JSON schema"
-        ) from error
-    if not draft.reference_answer.strip():
-        raise EvaluationOutputError("the reference answer must not be empty")
-    if draft.answerable and not draft.required_facts:
-        raise EvaluationOutputError(
-            "an answerable reference must contain required facts"
-        )
-    if draft.answerable and not draft.keywords:
-        raise EvaluationOutputError(
-            "an answerable reference must contain keywords"
-        )
-    if draft.answerable and draft.category is EvaluationCategory.UNANSWERABLE:
-        raise EvaluationOutputError(
-            "an answerable reference cannot use the unanswerable category"
-        )
-    return draft
-
-
 def _judge_draft(text: str) -> JudgeDraft:
     try:
         return JudgeDraft.model_validate(_parse_json_object(text))
@@ -147,350 +87,6 @@ def _judge_draft(text: str) -> JudgeDraft:
         raise EvaluationOutputError(
             "the judge returned an invalid JSON schema"
         ) from error
-
-
-def _question_generation_draft(text: str) -> QuestionGenerationDraft:
-    try:
-        return QuestionGenerationDraft.model_validate(_parse_json_object(text))
-    except ValidationError as error:
-        raise EvaluationOutputError(
-            "the question generator returned an invalid JSON schema"
-        ) from error
-
-
-def _ingested_chunks() -> list[DocumentChunk]:
-    """Recreate chunks from artifacts already produced by ingestion."""
-    if config.EVALUATION_CORPUS_SNAPSHOT_FILE.is_file():
-        return read_evaluation_corpus_snapshot()
-
-    chunks: list[DocumentChunk] = []
-    if config.TEMP_DATA_DIRECTORY.is_dir():
-        chunks.extend(
-            chunk_documents(
-                input_directory=config.TEMP_DATA_DIRECTORY,
-                chunk_size=CHUNK_SIZE,
-                chunk_overlap=CHUNK_OVERLAP,
-                batch_size=CHUNKING_BATCH_SIZE,
-                max_workers=MAX_WORKERS,
-            )
-        )
-    if config.STRUCTURED_DATA_DIRECTORY.is_dir():
-        chunks.extend(
-            chunk_structured_data(
-                input_directory=config.STRUCTURED_DATA_DIRECTORY,
-                chunk_size=CHUNK_SIZE,
-                chunk_overlap=CHUNK_OVERLAP,
-                batch_size=CHUNKING_BATCH_SIZE,
-                max_workers=MAX_WORKERS,
-            )
-        )
-    if not chunks:
-        raise ValueError(
-            "No ingested content is available. Complete ingestion before "
-            "generating an evaluation dataset."
-        )
-    write_evaluation_corpus_snapshot(chunks)
-    return chunks
-
-
-def _diverse_question_context(
-    chunks: list[DocumentChunk],
-) -> list[DocumentChunk]:
-    """Select bounded, source-diverse excerpts for question generation."""
-    by_source: dict[str, list[DocumentChunk]] = defaultdict(list)
-    for chunk in chunks:
-        by_source[chunk.source_file].append(chunk)
-
-    interleaved: list[DocumentChunk] = []
-    position = 0
-    sources = sorted(by_source)
-
-    while True:
-        added = False
-        for source in sources:
-            source_chunks = by_source[source]
-            if position >= len(source_chunks):
-                continue
-            interleaved.append(source_chunks[position])
-            added = True
-        if not added:
-            break
-        position += 1
-
-    candidates = interleaved
-    if len(interleaved) > QUESTION_CONTEXT_MAX_CHUNKS:
-        last_index = len(interleaved) - 1
-        candidates = [
-            interleaved[
-                round(
-                    index
-                    * last_index
-                    / (QUESTION_CONTEXT_MAX_CHUNKS - 1)
-                )
-            ]
-            for index in range(QUESTION_CONTEXT_MAX_CHUNKS)
-        ]
-
-    selected: list[DocumentChunk] = []
-    selected_characters = 0
-    for chunk in candidates:
-        character_count = min(len(chunk.content), 1_200)
-        if (
-            selected
-            and selected_characters + character_count
-            > QUESTION_CONTEXT_MAX_CHARACTERS
-        ):
-            break
-        selected.append(chunk)
-        selected_characters += character_count
-    return selected
-
-
-def generate_evaluation_questions(
-    reference_provider: LLMProvider,
-    questions_per_category: int,
-    *,
-    chunks: list[DocumentChunk] | None = None,
-) -> tuple[
-    list[GeneratedEvaluationQuestion],
-    list[LLMUsage | None],
-    dict[str, list[DocumentChunk]],
-]:
-    """Generate a balanced question set from ingested corpus excerpts."""
-    if questions_per_category < 1 or questions_per_category > 5:
-        raise ValueError("questions_per_category must be between 1 and 5")
-
-    available_chunks = _ingested_chunks() if chunks is None else chunks
-    if not available_chunks:
-        raise ValueError(
-            "No ingested content is available. Complete ingestion before "
-            "generating an evaluation dataset."
-        )
-    context = _diverse_question_context(available_chunks)
-    questions: list[GeneratedEvaluationQuestion] = []
-    usages: list[LLMUsage | None] = []
-    categories = tuple(EvaluationCategory)
-    for start in range(
-        0,
-        len(categories),
-        QUESTION_GENERATION_CATEGORY_BATCH_SIZE,
-    ):
-        category_batch = categories[
-            start : start + QUESTION_GENERATION_CATEGORY_BATCH_SIZE
-        ]
-        expected_question_count = len(category_batch) * questions_per_category
-        max_output_tokens = min(
-            QUESTION_GENERATION_MAX_OUTPUT_TOKENS,
-            QUESTION_GENERATION_BASE_OUTPUT_TOKENS
-            + expected_question_count
-            * QUESTION_GENERATION_OUTPUT_TOKENS_PER_QUESTION,
-        )
-        generated = invoke_chat_model(
-            build_question_generation_messages(
-                context,
-                questions_per_category,
-                category_batch,
-            ),
-            reference_provider,
-            max_output_tokens=max_output_tokens,
-            response_schema=QuestionGenerationDraft,
-        )
-        draft = _question_generation_draft(generated.text)
-        counts = Counter(question.category for question in draft.questions)
-        expected_categories = set(category_batch)
-        if set(counts) != expected_categories or any(
-            counts[category] != questions_per_category
-            for category in expected_categories
-        ):
-            raise EvaluationOutputError(
-                "the question generator did not return the requested number of "
-                "questions for every category"
-            )
-        for question in draft.questions:
-            evidence_numbers = list(
-                dict.fromkeys(question.relevant_evidence_numbers)
-            )
-            if any(
-                number < 1 or number > len(context)
-                for number in evidence_numbers
-            ):
-                raise EvaluationOutputError(
-                    "the question generator returned an invalid evidence number"
-                )
-            if (
-                question.category is EvaluationCategory.UNANSWERABLE
-                and evidence_numbers
-            ):
-                raise EvaluationOutputError(
-                    "an unanswerable question cannot identify supporting evidence"
-                )
-            if (
-                question.category is not EvaluationCategory.UNANSWERABLE
-                and not evidence_numbers
-            ):
-                raise EvaluationOutputError(
-                    "an answerable generated question must identify supporting "
-                    "evidence"
-                )
-            question.relevant_evidence_numbers = evidence_numbers
-        questions.extend(draft.questions)
-        usages.append(generated.usage)
-
-    normalized_questions = [
-        " ".join(question.question.split()) for question in questions
-    ]
-    if any(not question for question in normalized_questions):
-        raise EvaluationOutputError(
-            "the question generator returned a blank question"
-        )
-    if len({question.casefold() for question in normalized_questions}) != len(
-        normalized_questions
-    ):
-        raise EvaluationOutputError(
-            "the question generator returned duplicate questions"
-        )
-
-    normalized = [
-        question.model_copy(update={"question": normalized})
-        for question, normalized in zip(questions, normalized_questions)
-    ]
-    evidence_hints = {
-        question.question.casefold(): [
-            context[number - 1]
-            for number in question.relevant_evidence_numbers
-        ]
-        for question in normalized
-    }
-    return normalized, usages, evidence_hints
-
-
-def _retrieved_document_chunk(chunk: DocumentChunk) -> RetrievedChunk:
-    return RetrievedChunk(
-        content=chunk.content,
-        relevance_score=1.0,
-        chunk_id=chunk.chunk_id,
-        source_file=chunk.source_file,
-        source_type=chunk.source_type,
-        section=chunk.section,
-        chunk_index=chunk.chunk_index,
-    )
-
-
-def _reference_evidence(
-    retrieved: list[RetrievedChunk],
-    anchored: Iterable[DocumentChunk],
-) -> list[RetrievedChunk]:
-    """Put source anchors first, followed by deduplicated retrieval results."""
-    combined = [*map(_retrieved_document_chunk, anchored), *retrieved]
-    selected = []
-    seen_content = set()
-    for chunk in combined:
-        content_hash = text_sha256(chunk.content)
-        if content_hash in seen_content:
-            continue
-        seen_content.add(content_hash)
-        selected.append(chunk)
-    return selected
-
-
-def _normalized_questions(questions: Iterable[str]) -> list[str]:
-    normalized = []
-    seen = set()
-    for question in questions:
-        candidate = " ".join(question.split())
-        if not candidate or candidate.casefold() in seen:
-            continue
-        seen.add(candidate.casefold())
-        normalized.append(candidate)
-    if not normalized:
-        raise ValueError("at least one non-empty question is required")
-    return normalized
-
-
-def generate_ground_truth_records(
-    questions: Iterable[str],
-    reference_provider: LLMProvider,
-    retrieval: RetrievalConfiguration,
-    *,
-    router: QueryRouter | None = None,
-    category_hints: Mapping[str, EvaluationCategory] | None = None,
-    evidence_hints: Mapping[str, Iterable[DocumentChunk]] | None = None,
-) -> list[GroundTruthRecord]:
-    """Create machine-generated, reviewable ground truth from current evidence."""
-    query_router = router or get_query_router()
-    options = _retrieval_options(retrieval)
-    records = []
-    corpus_fingerprint = indexed_corpus_fingerprint()
-
-    for question in _normalized_questions(questions):
-        category_hint = (category_hints or {}).get(question.casefold())
-        retrieved_chunks = query_router.search(question, options)
-        chunks = _reference_evidence(
-            retrieved_chunks,
-            (evidence_hints or {}).get(question.casefold(), ()),
-        )
-        generated = invoke_chat_model(
-            build_reference_messages(question, chunks),
-            reference_provider,
-            max_output_tokens=REFERENCE_GENERATION_MAX_OUTPUT_TOKENS,
-            response_schema=ReferenceDraft,
-        )
-        draft = _reference_draft(generated.text)
-        evidence_numbers = list(dict.fromkeys(draft.relevant_evidence_numbers))
-        if any(number < 1 or number > len(chunks) for number in evidence_numbers):
-            raise EvaluationOutputError(
-                "the reference model returned an invalid evidence number"
-            )
-        if draft.answerable and not evidence_numbers:
-            raise EvaluationOutputError(
-                "an answerable reference must identify supporting evidence"
-            )
-
-        retrieved_evidence = [
-            snapshot_evidence(chunk, position)
-            for position, chunk in enumerate(chunks, start=1)
-        ]
-        relevant_evidence = (
-            [
-                retrieved_evidence[number - 1]
-                for number in evidence_numbers
-            ]
-            if draft.answerable
-            else []
-        )
-        required_facts = draft.required_facts if draft.answerable else []
-        records.append(
-            GroundTruthRecord(
-                id=text_sha256(question.casefold())[:16],
-                question=question,
-                answerable=draft.answerable,
-                reference_answer=draft.reference_answer.strip(),
-                category=(
-                    category_hint
-                    if draft.answerable
-                    and category_hint is not None
-                    and category_hint is not EvaluationCategory.UNANSWERABLE
-                    else (
-                        draft.category
-                        if draft.answerable
-                        else EvaluationCategory.UNANSWERABLE
-                    )
-                ),
-                keywords=draft.keywords if draft.answerable else [],
-                required_facts=required_facts,
-                retrieved_evidence=retrieved_evidence,
-                relevant_evidence=relevant_evidence,
-                evidence_fingerprint=evidence_fingerprint(retrieved_evidence),
-                corpus_fingerprint=corpus_fingerprint,
-                generated_at=datetime.now(timezone.utc),
-                reference_provider=generated.provider,
-                reference_model=generated.model_name,
-                reference_usage=generated.usage,
-                retrieval=retrieval,
-                review_status=ReviewStatus.MACHINE_GENERATED,
-            )
-        )
-    return records
 
 
 def _retrieval_scores(
@@ -614,6 +210,8 @@ def evaluate_record(
     started_at = perf_counter()
     status = ground_truth_status(record)
     warnings = []
+    if not record.relevant_evidence:
+        warnings.append("Retrieval metrics unavailable: no reference evidence was supplied.")
     if answer_provider is judge_provider:
         warnings.append("The answer and judge use the same provider.")
 
@@ -691,13 +289,28 @@ def evaluate_record(
             warnings=warnings,
             error=error,
         )
-    grading_ms = (perf_counter() - grading_started) * 1000
-
     overall = overall_answer_score(
         completeness=judge.completeness,
         relevance=judge.relevance,
     )
+    similarity = None
+    try:
+        similarity = semantic_similarity(
+            record.reference_answer, generated_answer.answer,
+        )
+    except Exception:
+        warnings.append(
+            "Semantic similarity unavailable: the embedding model could not score this answer."
+        )
     answer_scores = AnswerScores(
+        correctness=judge.correctness,
+        groundedness=judge.groundedness,
+        abstention=judge.abstention if not record.answerable else None,
+        citation_validity=citation_validity(generated_answer.answer, len(chunks)),
+        semantic_similarity=similarity,
+        lexical_similarity=lexical_similarity(
+            record.reference_answer, generated_answer.answer,
+        ),
         completeness=judge.completeness,
         relevance=judge.relevance,
         overall=overall,
@@ -707,6 +320,7 @@ def evaluate_record(
         and judge.relevance >= PASS_THRESHOLD
     )
 
+    grading_ms = (perf_counter() - grading_started) * 1000
     total_ms = (perf_counter() - started_at) * 1000
     return EvaluationCaseResult(
         record_id=record.id,
@@ -736,6 +350,7 @@ def evaluate_record(
         ),
         retrieval_scores=_retrieval_scores(record, chunks),
         answer_scores=answer_scores,
+        unsupported_claims=judge.unsupported_claims,
         missing_facts=judge.missing_facts,
         rationale=judge.rationale,
         passed=passed,
@@ -794,6 +409,13 @@ def _summary(
         completeness=_mean(score.completeness for score in answer_scores),
         relevance=_mean(score.relevance for score in answer_scores),
         overall=_mean(score.overall for score in answer_scores),
+        **{
+            name: _mean(getattr(score, name) for score in answer_scores)
+            for name in (
+                "correctness", "groundedness", "citation_validity",
+                "semantic_similarity", "lexical_similarity", "abstention",
+            )
+        },
     )
     return ProviderEvaluationSummary(
         provider=provider,
@@ -830,24 +452,26 @@ def run_evaluation(
     retrieval: RetrievalConfiguration,
     *,
     router: QueryRouter | None = None,
+    content_sha256: str | None = None,
+    on_case_complete: Callable[[], None] | None = None,
 ) -> EvaluationRun:
     """Run a dataset now; this function is never called automatically."""
     query_router = router or get_query_router()
-    results = [
-        evaluate_record(
-            record,
-            answer_provider,
-            judge_provider,
-            retrieval,
-            router=query_router,
-        )
-        for answer_provider in answer_providers
-        for record in records
-    ]
+    results = []
+    for answer_provider in answer_providers:
+        for record in records:
+            results.append(
+                evaluate_record(
+                    record, answer_provider, judge_provider, retrieval,
+                    router=query_router,
+                )
+            )
+            if on_case_complete is not None:
+                on_case_complete()
     return EvaluationRun(
         run_id=str(uuid4()),
         dataset_name=dataset_name,
-        dataset_sha256=dataset_sha256(dataset_name),
+        dataset_sha256=content_sha256 or dataset_sha256(dataset_name),
         generated_at=datetime.now(timezone.utc),
         judge_provider=judge_provider,
         usage=summarize_llm_usage(

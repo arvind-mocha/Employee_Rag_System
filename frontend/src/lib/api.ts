@@ -3,6 +3,9 @@ import type {
   AnswerResponse,
   DataUploadResponse,
   DeleteEvaluationDatasetResponse,
+  DatasetUploadResponse,
+  EvaluationDataset,
+  EvaluationDatasetPreview,
   EvaluationJobAccepted,
   EvaluationJobStatus,
   IngestionStartResponse,
@@ -106,15 +109,35 @@ export const api = {
   getIngestionStatus: () =>
     request<IngestionStatusResponse>('/ingestion/status'),
 
-  generateDataset: (payload: {
-    dataset_name: string
-    questions_per_category: number
-    reference_provider: Provider
-    overwrite: boolean
-  } & RetrievalOptions) =>
-    request<EvaluationJobAccepted>('/evaluations/datasets/generate/async', {
-      method: 'POST',
-      body: JSON.stringify(payload),
+  listDatasets: () =>
+    request<{ datasets: EvaluationDataset[] }>('/evaluations/datasets'),
+
+  previewDataset: (datasetId: string, offset = 0) =>
+    request<EvaluationDatasetPreview>(
+      `/evaluations/datasets/${encodeURIComponent(datasetId)}?offset=${offset}&limit=20`,
+    ),
+
+  uploadDatasets: (files: File[], onProgress: (percent: number) => void) =>
+    new Promise<DatasetUploadResponse>((resolve, reject) => {
+      const form = new FormData()
+      files.forEach((file) => form.append('files', file))
+      const xhr = new XMLHttpRequest()
+      xhr.open('POST', `${API_ROOT}/evaluations/datasets/upload`)
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable) onProgress(Math.round(event.loaded / event.total * 100))
+      }
+      xhr.onerror = () => reject(new ApiError('Upload failed. Check your connection and retry.', 0))
+      xhr.onload = () => {
+        let body
+        try { body = JSON.parse(xhr.responseText) }
+        catch { reject(new ApiError(`Upload failed (${xhr.status})`, xhr.status)); return }
+        if (xhr.status < 200 || xhr.status >= 300) {
+          reject(new ApiError(typeof body.detail === 'string' ? body.detail : 'Upload failed.', xhr.status))
+        } else {
+          resolve(body as DatasetUploadResponse)
+        }
+      }
+      xhr.send(form)
     }),
 
   deleteDataset: (datasetName: string) =>
@@ -124,7 +147,7 @@ export const api = {
     ),
 
   runEvaluation: (payload: {
-    dataset_name: string
+    dataset_ids: string[]
     answer_providers: Provider[]
     judge_provider: Provider
   } & RetrievalOptions) =>

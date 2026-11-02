@@ -6,6 +6,7 @@ remain in the encrypted PostgreSQL credential store and are not defined here.
 """
 
 from pathlib import Path
+import os
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -68,9 +69,6 @@ DATA_DIRECTORY = PROJECT_ROOT / "data"
 STRUCTURED_DATA_DIRECTORY = PROJECT_ROOT / "structured_data"
 TEMP_DATA_DIRECTORY = PROJECT_ROOT / "temp_data"
 EVALUATION_DATA_DIRECTORY = PROJECT_ROOT / "evaluation_data"
-EVALUATION_CORPUS_SNAPSHOT_FILE = (
-    TEMP_DATA_DIRECTORY / ".evaluation_corpus.json"
-)
 
 STRUCTURED_EXTENSIONS = frozenset({".csv", ".json", ".xlsx"})
 UNSTRUCTURED_EXTENSIONS = frozenset(
@@ -80,5 +78,8 @@ UNSTRUCTURED_EXTENSIONS = frozenset(
 MAX_ZIP_SIZE = 50 * 1024 * 1024
 MAX_UNCOMPRESSED_SIZE = 200 * 1024 * 1024
 MAX_FILE_COUNT = 1_000
-MAX_EVALUATION_DATASET_SIZE = 10 * 1024 * 1024
-MAX_EVALUATION_RECORDS = 100
+MAX_EVALUATION_DATASET_SIZE = int(
+    os.getenv("MAX_EVALUATION_DATASET_SIZE", 10 * 1024 * 1024)
+)
+MAX_EVALUATION_RECORDS = int(os.getenv("MAX_EVALUATION_RECORDS", 100))
+MAX_EVALUATION_UPLOAD_FILES = int(os.getenv("MAX_EVALUATION_UPLOAD_FILES", 5))

@@ -236,18 +236,30 @@ longer while the embedding model downloads.
 
 1. Start the evaluation worker.
 2. Open **Evaluation** in Developer mode.
-3. Select **Configure generator** and choose how many questions to create per
-   category.
-4. Select **Generate dataset**. The worker derives questions from the ingested
-   corpus and preserves supporting source excerpts as ground-truth evidence.
-5. Review machine-generated ground truth.
-6. Select answer providers, a judge provider, and retrieval settings.
-7. Run the evaluation and review the quality dashboard.
+3. Upload one or multiple user-authored `.jsonl` files using drag-and-drop or
+   **Upload datasets**. Each file is validated and stored independently.
+4. Preview datasets, then use checkboxes to select the files to evaluate.
+5. Select answer providers, a judge provider, and retrieval settings.
+6. Click **Run Evaluation**, follow progress, and inspect individual file results
+   or the aggregated dashboard. Background jobs continue during page navigation.
+7. Upload additional files or change the selection for later runs; individual
+   datasets can be deleted from the library.
 
-Evaluation includes retrieval metrics, correctness, groundedness, completeness,
-relevance, citation quality, abstention behavior, similarity, latency, token
-usage, and estimated cost. Generated evaluation datasets are limited to 100
-records by default.
+Every record requires a nonblank `question` and `reference_answer`. Optional
+fields include `id`, `answerable`, `category`, `expected_keywords`,
+`required_facts`, `reference_evidence`, and `metadata`. Unanswerable cases use
+`answerable:false` with a reference abstention. Start with
+[examples/evaluation.jsonl](examples/evaluation.jsonl) and read the
+[full schema](docs/evaluation.md#jsonl-schema).
+
+Evaluation includes retrieval metrics when reference evidence is provided,
+LLM judgment, completeness, relevance, citation validity, similarity, abstention,
+latency, token usage, and estimated cost. Files without retrieval ground truth
+show those metrics as unavailable. Default limits are 10 MiB and 100 records per
+file, with up to five files per upload; see the evaluation guide to configure them.
+Uploaded files persist in `evaluation_data/`, including across Docker restarts.
+Duplicate filenames receive distinct dataset IDs. The application never creates
+evaluation questions or reference answers automatically.
 
 ## Security and deployment
 

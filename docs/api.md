@@ -48,13 +48,13 @@ Provider names are `gemini`, `openai`, `anthropic`, and `grok`.
 
 | Method | Endpoint | Success | Purpose |
 | --- | --- | --- | --- |
-| `POST` | `/evaluations/datasets/generate` | `201` | Generate ground truth synchronously |
-| `POST` | `/evaluations/datasets/upload` | `201` | Administrative compatibility endpoint for validated JSONL |
-| `DELETE` | `/evaluations/datasets/{dataset_name}` | `200` | Delete one named evaluation dataset |
-| `POST` | `/evaluations/run` | `200` | Run an evaluation synchronously |
-| `POST` | `/evaluations/datasets/generate/async` | `202` | Queue ground-truth generation |
-| `POST` | `/evaluations/run/async` | `202` | Queue an evaluation run |
-| `GET` | `/evaluations/jobs/{job_id}` | `200` | Read job status, result, or error |
+| `POST` | `/evaluations/datasets/upload` | `201` | Validate and persist one or multiple JSONL files |
+| `GET` | `/evaluations/datasets` | `200` | List metadata for all datasets |
+| `GET` | `/evaluations/datasets/{dataset_id}` | `200` | Metadata and paginated record preview (`offset`, `limit`, max 100) |
+| `DELETE` | `/evaluations/datasets/{dataset_id}` | `200` | Delete one specific dataset |
+| `POST` | `/evaluations/run` | `200` | Evaluate explicitly selected dataset IDs synchronously |
+| `POST` | `/evaluations/run/async` | `202` | Queue selected datasets for evaluation |
+| `GET` | `/evaluations/jobs/{job_id}` | `200` | Read job status, progress, result, or error |
 
 Asynchronous job states include `queued`, `running`, `completed`, `failed`,
 `deferred`, `scheduled`, `stopped`, and `canceled`.
@@ -147,29 +147,26 @@ The underlying request format is:
 `expires_in_hours` must be between `0.25` and `8760`. The response never returns
 the plaintext key.
 
-### Queue ground-truth generation
+### Upload evaluation files
 
 ```bash
-curl -X POST \
-  http://localhost:8000/api/v1/evaluations/datasets/generate/async \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "dataset_name": "employee-policies",
-    "questions_per_category": 1,
-    "reference_provider": "openai",
-    "semantic_search": true,
-    "keyword_search": true,
-    "query_rewriting": false,
-    "reranking": true,
-    "source_diversity": false,
-    "overwrite": false
-  }'
+curl -X POST http://localhost:8000/api/v1/evaluations/datasets/upload \
+  -F 'files=@examples/evaluation.jsonl' \
+  -F 'files=@another-dataset.jsonl'
 ```
 
-The worker derives questions from artifacts retained by the latest ingestion.
-`questions_per_category` accepts 1 through 5, producing 9 through 45 balanced
-questions. The response contains a `job_id` and `status_url`; poll it until the
-job completes or fails.
+Multipart `files` accepts one or more files. The earlier `dataset_file` field is
+also accepted for a single file. Dataset naming/overwrite form fields are no
+longer used: every accepted file gets a unique `dataset_id`. The response contains
+`datasets` (metadata for accepted files) and `errors` (filename and validation
+message for rejected files). A mixed batch returns `201` with both lists; a wholly
+invalid batch returns `422` with filenames and errors in `detail`. Invalid record
+messages include physical line numbers. No invalid file is partially saved.
+
+Each metadata object includes `dataset_id`, `filename`, `record_count`,
+`size_bytes`, `uploaded_at`, `validation_status`, `validation_error`, and
+`dataset_sha256`. Use the stable ID for preview, deletion, and evaluation.
+See [evaluation schema and examples](evaluation.md#jsonl-schema).
 
 ### Queue an evaluation run
 
@@ -177,7 +174,7 @@ job completes or fails.
 curl -X POST http://localhost:8000/api/v1/evaluations/run/async \
   -H 'Content-Type: application/json' \
   -d '{
-    "dataset_name": "employee-policies",
+    "dataset_ids": ["<first-dataset-id>", "<second-dataset-id>"],
     "answer_providers": ["openai", "anthropic"],
     "judge_provider": "openai",
     "semantic_search": true,
@@ -188,6 +185,19 @@ curl -X POST http://localhost:8000/api/v1/evaluations/run/async \
   }'
 ```
 
+The selected IDs must be nonempty, unique, and available. Optional `record_ids`
+restricts cases within each selected file and must exist in every selected file.
+Provider and retrieval settings apply to all selected datasets. Unselected files
+are never evaluated. The async response contains `job_id` and `status_url`;
+poll that URL to retrieve `completed_cases`, `total_cases`, `current_dataset_id`,
+status, and result. Both synchronous responses and completed async `result`
+contain `run_id`, `datasets` (independent per-file runs), and `aggregate` (combined
+case-weighted provider summaries and results). Cases include `dataset_id` and
+`dataset_name` as well as `record_id`. Missing retrieval ground truth yields null
+retrieval metrics. Queued jobs reject files changed or deleted before processing.
+
+Dataset generation endpoints and the generation CLI have been removed.
+
 ## Limits and validation
 
 | Input | Default limit |
@@ -195,12 +205,15 @@ curl -X POST http://localhost:8000/api/v1/evaluations/run/async \
 | Source ZIP | 50 MB compressed |
 | Extracted source data | 200 MB total |
 | Files in a ZIP | 1,000 |
-| Evaluation upload | 10 MB |
-| Automatically generated questions | 45 total; 1–5 for each of 9 categories |
-| Manually supplied evaluation records | 100 |
+| Evaluation upload | 10 MiB per file, 5 files per upload |
+| Evaluation records | 100 per file |
+| Datasets selected per run | 100 |
 | Question length | 2,000 characters |
 | Answer providers in one evaluation | 4 |
 
 FastAPI returns validation details for malformed requests. Service failures use
 safe messages without returning database URLs, decrypted keys, or provider
 secrets.
+
+Evaluation limits are configurable with `MAX_EVALUATION_DATASET_SIZE` (bytes),
+`MAX_EVALUATION_RECORDS`, and `MAX_EVALUATION_UPLOAD_FILES` for API and worker.
