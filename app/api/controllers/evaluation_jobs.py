@@ -7,10 +7,9 @@ from redis.exceptions import RedisError
 from rq.exceptions import NoSuchJobError
 from rq.job import Job
 
-from app.api.schemas.evaluation import (
-    GenerateEvaluationDatasetRequest,
-    RunEvaluationRequest,
-)
+from app.api.controllers.evaluation import load_selected_datasets
+from app.api.services.provider_configuration import validate_evaluation_providers
+from app.api.schemas.evaluation import RunEvaluationRequest
 from app.api.schemas.jobs import (
     EvaluationJobAccepted,
     EvaluationJobState,
@@ -62,22 +61,18 @@ def _enqueue(
     )
 
 
-def enqueue_dataset_generation(
-    request: GenerateEvaluationDatasetRequest,
-) -> EvaluationJobAccepted:
-    return _enqueue(
-        "app.evaluation.jobs.generate_dataset_job",
-        request.model_dump(mode="json"),
-        "dataset_generation",
-    )
-
-
 def enqueue_evaluation_run(
     request: RunEvaluationRequest,
 ) -> EvaluationJobAccepted:
+    selected = load_selected_datasets(request)
+    validate_evaluation_providers(request.answer_providers, request.judge_provider)
+    payload = request.model_dump(mode="json")
+    payload["expected_hashes"] = {
+        meta["dataset_id"]: meta["dataset_sha256"] for meta, _ in selected
+    }
     return _enqueue(
         "app.evaluation.jobs.run_evaluation_job",
-        request.model_dump(mode="json"),
+        payload,
         "evaluation_run",
     )
 
@@ -116,12 +111,12 @@ def get_evaluation_job(job_id: str) -> EvaluationJobStatus:
     elif mapped_status == "failed":
         error = "Evaluation worker failed. Check the worker logs."
 
-    job_type = metadata.get("job_type")
-    if job_type not in {"dataset_generation", "evaluation_run"}:
-        job_type = "evaluation_run"
     return EvaluationJobStatus(
         job_id=job.id,
-        job_type=job_type,
+        job_type="evaluation_run",
+        completed_cases=metadata.get("completed_cases", 0),
+        total_cases=metadata.get("total_cases", 0),
+        current_dataset_id=metadata.get("current_dataset_id"),
         status=mapped_status,
         enqueued_at=job.enqueued_at,
         started_at=job.started_at,

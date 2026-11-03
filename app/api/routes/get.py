@@ -3,10 +3,21 @@
 from http import HTTPStatus
 
 from app.api.controllers.ingestion import get_ingestion_status
+from app.api.controllers.evaluation import (
+    get_evaluation_example,
+    get_evaluation_schema,
+    list_evaluation_datasets,
+    preview_evaluation_dataset,
+)
 from app.api.controllers.evaluation_jobs import get_evaluation_job
 from app.api.controllers.retrieval import retrieve_chunks
 from app.api.controllers.settings import list_provider_credentials
 from app.api.routes.definition import ApiRoute
+from app.api.schemas.evaluation import (
+    EvaluationDatasetList,
+    EvaluationDatasetPreview,
+    EvaluationSchemaReference,
+)
 from app.api.schemas.ingestion import IngestionStatusResponse
 from app.api.schemas.jobs import EvaluationJobStatus
 from app.api.schemas.retrieval import RetrievalResponse
@@ -14,6 +25,38 @@ from app.api.schemas.settings import ProviderCredentialListResponse
 
 
 GET_ROUTES = (
+    ApiRoute(
+        name="get_evaluation_example",
+        path="/evaluations/reference/example",
+        endpoint=get_evaluation_example,
+        response_model=None,
+        status_code=HTTPStatus.OK,
+        tags=("evaluations",),
+    ),
+    ApiRoute(
+        name="get_evaluation_schema",
+        path="/evaluations/reference/schema",
+        endpoint=get_evaluation_schema,
+        response_model=EvaluationSchemaReference,
+        status_code=HTTPStatus.OK,
+        tags=("evaluations",),
+    ),
+    ApiRoute(
+        name="list_evaluation_datasets",
+        path="/evaluations/datasets",
+        endpoint=list_evaluation_datasets,
+        response_model=EvaluationDatasetList,
+        status_code=HTTPStatus.OK,
+        tags=("evaluations",),
+    ),
+    ApiRoute(
+        name="preview_evaluation_dataset",
+        path="/evaluations/datasets/{dataset_id}",
+        endpoint=preview_evaluation_dataset,
+        response_model=EvaluationDatasetPreview,
+        status_code=HTTPStatus.OK,
+        tags=("evaluations",),
+    ),
     ApiRoute(
         name="list_provider_credentials",
         path="/settings/providers",

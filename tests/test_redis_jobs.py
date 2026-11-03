@@ -13,51 +13,13 @@ from app.core.redis_client import RedisSettings
 class RedisEvaluationJobApiTests(unittest.TestCase):
     def setUp(self) -> None:
         self.client = TestClient(app)
+        validation = patch("app.api.controllers.evaluation_jobs.validate_evaluation_providers")
+        validation.start()
+        self.addCleanup(validation.stop)
 
-    @patch("app.api.controllers.evaluation_jobs.get_redis_settings")
+    @patch("app.api.controllers.evaluation_jobs.load_selected_datasets", return_value=[])
     @patch("app.api.controllers.evaluation_jobs.get_evaluation_queue")
-    def test_enqueues_dataset_generation(
-        self,
-        get_queue,
-        get_settings,
-    ) -> None:
-        queued_job = Mock(id="job-123")
-        get_queue.return_value.enqueue_call.return_value = queued_job
-        get_settings.return_value = RedisSettings()
-
-        response = self.client.post(
-            "/api/v1/evaluations/datasets/generate/async",
-            json={
-                "dataset_name": "employee-policies",
-                "questions_per_category": 1,
-                "reference_provider": "openai",
-            },
-        )
-
-        self.assertEqual(response.status_code, 202)
-        self.assertEqual(response.json()["job_id"], "job-123")
-        self.assertEqual(response.json()["status"], "queued")
-        self.assertEqual(
-            response.json()["status_url"],
-            "/api/v1/evaluations/jobs/job-123",
-        )
-        enqueue_call = get_queue.return_value.enqueue_call.call_args
-        self.assertEqual(
-            enqueue_call.kwargs["func"],
-            "app.evaluation.jobs.generate_dataset_job",
-        )
-        self.assertEqual(
-            enqueue_call.kwargs["meta"]["job_type"],
-            "dataset_generation",
-        )
-        self.assertIsNone(enqueue_call.kwargs["args"][0]["questions"])
-        self.assertEqual(
-            enqueue_call.kwargs["args"][0]["questions_per_category"],
-            1,
-        )
-
-    @patch("app.api.controllers.evaluation_jobs.get_evaluation_queue")
-    def test_reports_redis_enqueue_failure(self, get_queue) -> None:
+    def test_reports_redis_enqueue_failure(self, get_queue, _selected) -> None:
         get_queue.return_value.enqueue_call.side_effect = RedisConnectionError(
             "connection refused"
         )
@@ -65,7 +27,7 @@ class RedisEvaluationJobApiTests(unittest.TestCase):
         response = self.client.post(
             "/api/v1/evaluations/run/async",
             json={
-                "dataset_name": "employee-policies",
+                "dataset_ids": ["employee-policies"],
                 "answer_providers": ["openai"],
                 "judge_provider": "anthropic",
             },
@@ -92,7 +54,7 @@ class RedisEvaluationJobApiTests(unittest.TestCase):
             ended_at=now,
         )
         job.get_status.return_value = "finished"
-        job.get_meta.return_value = {"job_type": "dataset_generation"}
+        job.get_meta.return_value = {"job_type": "evaluation_run"}
         fetch.return_value = job
         get_queue.return_value.serializer = Mock()
 

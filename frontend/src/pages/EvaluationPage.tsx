@@ -1,15 +1,12 @@
-import { FormEvent, useMemo, useRef, useState } from 'react'
+import { FormEvent, useMemo, useState } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import {
   AlertTriangle,
   BarChart3,
-  Check,
   CheckCircle2,
   ChevronRight,
   ChevronDown,
   CircleDollarSign,
-  Database,
-  FilePlus2,
   Gauge,
   Info,
   Layers3,
@@ -18,7 +15,6 @@ import {
   ShieldCheck,
   Sparkles,
   Target,
-  Trash2,
   X,
   XCircle,
 } from 'lucide-react'
@@ -32,6 +28,12 @@ import {
   XAxis,
   YAxis,
 } from 'recharts'
+import { Link } from 'react-router-dom'
+import { EvaluationProviderStatus, ProviderPicker } from '../components/EvaluationProviders'
+import { EvaluationReference } from '../components/EvaluationReference'
+import { useProviderConfiguration } from '../hooks/useProviderConfiguration'
+import { evaluationConfigurationError, providerConfiguration, PROVIDER_STATUS_LABELS } from '../lib/providerConfiguration'
+import { EvaluationDatasets } from '../components/EvaluationDatasets'
 import { StrategyControls } from '../components/StrategyControls'
 import { api } from '../lib/api'
 import {
@@ -49,6 +51,7 @@ import {
   score100,
 } from '../lib/format'
 import type {
+  EvaluationBatchRun,
   EvaluationJobAccepted,
   EvaluationResult,
   EvaluationRun,
@@ -64,8 +67,7 @@ const TERMINAL_JOB_STATES = new Set([
 ])
 
 const EVALUATION_JOB_STORAGE_KEY = 'employee-rag-active-evaluation-job-v2'
-const DATASET_JOB_STORAGE_KEY = 'employee-rag-active-dataset-job'
-const DATASET_NAME_STORAGE_KEY = 'employee-rag-evaluation-dataset-name'
+const DATASET_SELECTION_KEY = 'employee-rag-evaluation-selection'
 const STORED_JOB_MAX_AGE_MS = 25 * 60 * 60 * 1_000
 
 interface StoredEvaluationJob {
@@ -78,7 +80,7 @@ function isEvaluationJob(value: unknown): value is EvaluationJobAccepted {
   const job = value as Record<string, unknown>
   return (
     typeof job.job_id === 'string' &&
-    (job.job_type === 'dataset_generation' || job.job_type === 'evaluation_run') &&
+    job.job_type === 'evaluation_run' &&
     job.status === 'queued' &&
     typeof job.status_url === 'string' &&
     job.status_url.startsWith('/api/v1/evaluations/jobs/')
@@ -115,17 +117,11 @@ function storeJob(key: string, job: EvaluationJobAccepted | null) {
   window.localStorage.setItem(key, JSON.stringify(stored))
 }
 
-function readStoredDatasetName(): string {
-  const storedValue = window.localStorage.getItem(DATASET_NAME_STORAGE_KEY)
-  if (storedValue === null) return 'employee-policies'
-  const value = storedValue
-  return /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(value)
-    ? value
-    : ''
-}
-
-function storeDatasetName(value: string) {
-  window.localStorage.setItem(DATASET_NAME_STORAGE_KEY, value)
+function readStoredSelection(): string[] {
+  try {
+    const value: unknown = JSON.parse(window.localStorage.getItem(DATASET_SELECTION_KEY) ?? '[]')
+    return Array.isArray(value) && value.every((id) => typeof id === 'string') ? value : []
+  } catch { return [] }
 }
 
 function useEvaluationJob(job: EvaluationJobAccepted | null) {
@@ -138,46 +134,6 @@ function useEvaluationJob(job: EvaluationJobAccepted | null) {
       return status && TERMINAL_JOB_STATES.has(status) ? false : 1500
     },
   })
-}
-
-function ProviderPicker({
-  selected,
-  onChange,
-}: {
-  selected: Provider[]
-  onChange: (providers: Provider[]) => void
-}) {
-  const toggle = (provider: Provider) => {
-    if (selected.includes(provider)) {
-      if (selected.length === 1) return
-      onChange(selected.filter((item) => item !== provider))
-    } else {
-      onChange([...selected, provider])
-    }
-  }
-
-  return (
-    <div className="provider-check-grid">
-      {PROVIDERS.map((provider) => {
-        const active = selected.includes(provider.id)
-        return (
-          <button
-            type="button"
-            key={provider.id}
-            className={active ? 'selected' : ''}
-            onClick={() => toggle(provider.id)}
-            aria-pressed={active}
-          >
-            <i style={{ background: PROVIDER_COLORS[provider.id] }}>
-              {provider.shortName}
-            </i>
-            <span>{provider.name}</span>
-            <b>{active && <Check size={13} />}</b>
-          </button>
-        )
-      })}
-    </div>
-  )
 }
 
 function JobProgress({
@@ -265,7 +221,7 @@ function CaseScore({
   return (
     <div className={belowThreshold ? 'case-score below-threshold' : 'case-score'}>
       <span>{label}</span>
-      <strong>{score100(value)}</strong>
+      <strong>{value == null ? 'Unavailable' : score100(value)}</strong>
       <div className="case-score-track" aria-hidden="true">
         <i style={{ width: `${Math.max(0, Math.min(100, (value ?? 0) * 100))}%` }} />
       </div>
@@ -358,7 +314,7 @@ function EvaluationDashboard({ run }: { run: EvaluationRun }) {
             icon={<CheckCircle2 size={18} />}
             label="Pass rate"
             value={evaluated ? `${Math.round((passed / evaluated) * 100)}%` : '—'}
-            detail={`${passed} of ${evaluated} graded answers`}
+            detail={`${passed} passed · ${evaluated - passed} failed · ${run.results.filter((result) => result.error).length} errored`}
           />
           <MetricCard
             icon={<CircleDollarSign size={18} />}
@@ -496,7 +452,7 @@ function EvaluationDashboard({ run }: { run: EvaluationRun }) {
               <button
                 type="button"
                 className="evaluation-case-row"
-                key={`${result.record_id}-${result.answer_provider}`}
+                key={`${result.dataset_id}-${result.record_id}-${result.answer_provider}`}
                 onClick={() => setSelectedCase(result)}
                 aria-label={`View answer for: ${result.question}`}
               >
@@ -504,7 +460,7 @@ function EvaluationDashboard({ run }: { run: EvaluationRun }) {
                   <strong>{result.question}</strong>
                   <small>
                     <span className="category-pill">{categoryLabel(result.category)}</span>
-                    {result.record_id}
+                    {result.dataset_name} · {result.dataset_id?.slice(0, 8)} · {result.record_id} · {result.error ? 'Errored' : result.passed ? 'Passed' : 'Failed'}
                   </small>
                 </span>
                 <span className="evaluation-case-model">
@@ -565,6 +521,10 @@ function EvaluationDashboard({ run }: { run: EvaluationRun }) {
                 <p>{selectedCase.answer || 'No answer was returned by the model.'}</p>
               </section>
 
+              <section className="case-copy-block">
+                <span>Reference answer · {selectedCase.dataset_name} · {selectedCase.dataset_id}</span>
+                <p>{selectedCase.reference_answer}</p>
+              </section>
               <section className="case-diagnosis">
                 <div className="case-detail-section-title">
                   <AlertTriangle size={17} />
@@ -590,6 +550,19 @@ function EvaluationDashboard({ run }: { run: EvaluationRun }) {
                   <CaseScore label="Overall" value={selectedCase.answer_scores?.overall} />
                   <CaseScore label="Completeness" value={selectedCase.answer_scores?.completeness} />
                   <CaseScore label="Relevance" value={selectedCase.answer_scores?.relevance} />
+                  <CaseScore label="Correctness" value={selectedCase.answer_scores?.correctness} />
+                  <CaseScore label="Groundedness" value={selectedCase.answer_scores?.groundedness} />
+                  <CaseScore label="Citation validity" value={selectedCase.answer_scores?.citation_validity} />
+                  <CaseScore label="Semantic similarity" value={selectedCase.answer_scores?.semantic_similarity} />
+                  <CaseScore label="Lexical similarity" value={selectedCase.answer_scores?.lexical_similarity} />
+                  <CaseScore label="Abstention" value={selectedCase.answer_scores?.abstention} />
+                  <CaseScore label="Retrieval precision" value={selectedCase.retrieval_scores?.precision_at_k} />
+                  <CaseScore label="Retrieval recall" value={selectedCase.retrieval_scores?.recall_at_k} />
+                  <CaseScore label="MRR" value={selectedCase.retrieval_scores?.reciprocal_rank} />
+                  <CaseScore label="MAP" value={selectedCase.retrieval_scores?.average_precision_at_k} />
+                  <CaseScore label="NDCG" value={selectedCase.retrieval_scores?.ndcg_at_k} />
+                  <CaseScore label="Source precision" value={selectedCase.retrieval_scores?.source_precision_at_k} />
+                  <CaseScore label="Source recall" value={selectedCase.retrieval_scores?.source_recall_at_k} />
                 </div>
                 <p className="case-threshold-note">Completeness and relevance must both be at least 80% to pass.</p>
               </section>
@@ -610,6 +583,19 @@ function EvaluationDashboard({ run }: { run: EvaluationRun }) {
                 </section>
               )}
 
+              {selectedCase.unsupported_claims.length > 0 && (
+                <section className="case-warning-block">
+                  <span>Unsupported claims</span>
+                  <ul>{selectedCase.unsupported_claims.map((claim) => <li key={claim}>{claim}</li>)}</ul>
+                </section>
+              )}
+
+              <section className="case-copy-block">
+                <span>Retrieval and usage</span>
+                <p>{selectedCase.retrieved_sources.join(', ') || 'No sources retrieved'}</p>
+                <p>{compactNumber(selectedCase.usage.total_tokens)} tokens · {money(selectedCase.usage.estimated_cost_usd)} · Retrieval {milliseconds(selectedCase.timing.retrieval_ms)} · Answer {milliseconds(selectedCase.timing.answer_generation_ms)} · Grading {milliseconds(selectedCase.timing.grading_ms)}</p>
+              </section>
+
               {selectedCase.warnings.length > 0 && (
                 <section className="case-warning-block">
                   <span>Warnings</span>
@@ -625,511 +611,198 @@ function EvaluationDashboard({ run }: { run: EvaluationRun }) {
 }
 
 export function EvaluationPage() {
-  const datasetBuilderRef = useRef<HTMLElement>(null)
-  const [datasetName, setDatasetName] = useState(readStoredDatasetName)
-  const [answerProviders, setAnswerProviders] = useState<Provider[]>([
-    'gemini',
-    'openai',
-  ])
-  const [judgeProvider, setJudgeProvider] = useState<Provider>('openai')
-  const [retrieval, setRetrieval] =
-    useState<RetrievalOptions>(DEFAULT_RETRIEVAL)
-  const [evaluationJob, setEvaluationJob] =
-    useState<EvaluationJobAccepted | null>(() =>
-      readStoredJob(EVALUATION_JOB_STORAGE_KEY),
-    )
-  const [showDatasetBuilder, setShowDatasetBuilder] = useState(false)
-  const [questionsPerCategory, setQuestionsPerCategory] = useState(1)
-  const [referenceProvider, setReferenceProvider] =
-    useState<Provider>('gemini')
-  const [overwrite, setOverwrite] = useState(false)
-  const [datasetJob, setDatasetJob] = useState<EvaluationJobAccepted | null>(
-    () => readStoredJob(DATASET_JOB_STORAGE_KEY),
+  const [selection, setSelection] = useState(readStoredSelection)
+  const [answerProviders, setAnswerProviders] = useState<Provider[]>(() => {
+    try {
+      const saved = JSON.parse(window.localStorage.getItem('employee-rag-answer-providers') ?? '[]')
+      return Array.isArray(saved) ? saved.filter((id): id is Provider => PROVIDERS.some((provider) => provider.id === id)) : []
+    } catch { return [] }
+  })
+  const [judgeProvider, setJudgeProvider] = useState<Provider | ''>(() => {
+    const saved = window.localStorage.getItem('employee-rag-judge-provider')
+    return PROVIDERS.some((provider) => provider.id === saved) ? saved as Provider : ''
+  })
+  const credentials = useProviderConfiguration()
+  const [credentialValidationError, setCredentialValidationError] = useState<string | null>(null)
+  const [checkingBeforeRun, setCheckingBeforeRun] = useState(false)
+  const changeAnswerProviders = (providers: Provider[]) => {
+    setAnswerProviders(providers)
+    setCredentialValidationError(null)
+    window.localStorage.setItem('employee-rag-answer-providers', JSON.stringify(providers))
+  }
+  const changeJudgeProvider = (provider: Provider | '') => {
+    setJudgeProvider(provider)
+    setCredentialValidationError(null)
+    window.localStorage.setItem('employee-rag-judge-provider', provider)
+  }
+  const [retrieval, setRetrieval] = useState<RetrievalOptions>(DEFAULT_RETRIEVAL)
+  const [evaluationJob, setEvaluationJob] = useState<EvaluationJobAccepted | null>(
+    () => readStoredJob(EVALUATION_JOB_STORAGE_KEY),
   )
-  const [datasetDeleteTarget, setDatasetDeleteTarget] = useState<string | null>(
-    null,
-  )
-
+  const [resultScope, setResultScope] = useState('aggregate')
+  const library = useQuery({ queryKey: ['evaluation-datasets'], queryFn: api.listDatasets })
+  const datasets = library.data?.datasets ?? []
+  const selected = datasets.filter((dataset) =>
+    selection.includes(dataset.dataset_id) && dataset.validation_status === 'valid',
+  ).map((dataset) => dataset.dataset_id)
+  const changeSelection = (ids: string[]) => {
+    setSelection(ids)
+    window.localStorage.setItem(DATASET_SELECTION_KEY, JSON.stringify(ids))
+  }
   const evaluationMutation = useMutation({
     mutationFn: api.runEvaluation,
     onSuccess: (job) => {
       storeJob(EVALUATION_JOB_STORAGE_KEY, job)
       setEvaluationJob(job)
+      setResultScope('aggregate')
     },
   })
   const evaluationStatus = useEvaluationJob(evaluationJob)
-
-  const datasetMutation = useMutation({
-    mutationFn: api.generateDataset,
-    onSuccess: (job) => {
-      storeJob(DATASET_JOB_STORAGE_KEY, job)
-      setDatasetJob(job)
-    },
-  })
-  const datasetStatus = useEvaluationJob(datasetJob)
-
-  const deleteDatasetMutation = useMutation({
-    mutationFn: api.deleteDataset,
-    onSuccess: (_, deletedName) => {
-      setDatasetDeleteTarget(null)
-      if (datasetName.trim() === deletedName) {
-        setDatasetName('')
-        storeDatasetName('')
+  const completedBatch = evaluationStatus.data?.status === 'completed' && evaluationStatus.data.result
+    ? evaluationStatus.data.result as unknown as EvaluationBatchRun : null
+  const visibleRun = completedBatch
+    ? resultScope === 'aggregate' ? completedBatch.aggregate
+      : completedBatch.datasets.find((run) => run.dataset_id === resultScope) ?? completedBatch.aggregate
+    : null
+  const activeEvaluation = evaluationMutation.isPending || Boolean(evaluationJob && (
+    !evaluationStatus.data || !TERMINAL_JOB_STATES.has(evaluationStatus.data.status)
+  ) && !evaluationStatus.isError)
+  const configurationError = evaluationConfigurationError(
+    selected, answerProviders, judgeProvider, credentials.configurations,
+  )
+  const runEvaluation = async (event: FormEvent) => {
+    event.preventDefault()
+    if (activeEvaluation || checkingBeforeRun) return
+    setCheckingBeforeRun(true)
+    setCredentialValidationError(null)
+    try {
+      // Always re-read credentials immediately before submission. Keep all
+      // selections intact when a key expires or the status request fails.
+      const latest = await credentials.refetch()
+      const configurations = PROVIDERS.map((provider) => providerConfiguration(
+        provider.id, latest.data?.providers ?? [], latest.isError,
+      ))
+      const error = evaluationConfigurationError(selected, answerProviders, judgeProvider, configurations)
+      if (error || !judgeProvider) {
+        setCredentialValidationError(error)
+        return
       }
-      storeJob(DATASET_JOB_STORAGE_KEY, null)
-      setDatasetJob(null)
-      datasetMutation.reset()
-      storeJob(EVALUATION_JOB_STORAGE_KEY, null)
-      setEvaluationJob(null)
-      evaluationMutation.reset()
-    },
-  })
-
-  const completedRun =
-    evaluationStatus.data?.status === 'completed' && evaluationStatus.data.result
-      ? (evaluationStatus.data.result as unknown as EvaluationRun)
-      : null
-
-  const runEvaluation = (event: FormEvent) => {
-    event.preventDefault()
-    if (!datasetName.trim() || !answerProviders.length) return
-    storeDatasetName(datasetName.trim())
-    storeJob(EVALUATION_JOB_STORAGE_KEY, null)
-    setEvaluationJob(null)
-    evaluationMutation.mutate({
-      dataset_name: datasetName.trim(),
-      answer_providers: answerProviders,
-      judge_provider: judgeProvider,
-      ...retrieval,
-    })
-  }
-
-  const generateDataset = (event: FormEvent) => {
-    event.preventDefault()
-    if (!datasetName.trim()) return
-    storeDatasetName(datasetName.trim())
-    storeJob(DATASET_JOB_STORAGE_KEY, null)
-    setDatasetJob(null)
-    datasetMutation.mutate({
-      dataset_name: datasetName.trim(),
-      questions_per_category: questionsPerCategory,
-      reference_provider: referenceProvider,
-      overwrite,
-      ...retrieval,
-    })
-  }
-
-  const toggleDatasetBuilder = () => {
-    if (showDatasetBuilder) {
-      setShowDatasetBuilder(false)
-      return
-    }
-    setShowDatasetBuilder(true)
-    window.requestAnimationFrame(() => {
-      datasetBuilderRef.current?.scrollIntoView({
-        behavior: 'smooth',
-        block: 'start',
+      evaluationMutation.mutate({
+        dataset_ids: selected, answer_providers: answerProviders,
+        judge_provider: judgeProvider, ...retrieval,
       })
-    })
+    } finally {
+      setCheckingBeforeRun(false)
+    }
   }
-
-  const activeEvaluation = evaluationMutation.isPending || Boolean(
-    evaluationStatus.data && !TERMINAL_JOB_STATES.has(evaluationStatus.data.status),
-  )
-  const activeDataset = datasetMutation.isPending || Boolean(
-    datasetStatus.data && !TERMINAL_JOB_STATES.has(datasetStatus.data.status),
-  )
 
   return (
     <div className="page evaluation-page">
       <div className="evaluation-hero">
         <div>
-          <span className="eyebrow">
-            <BarChart3 size={14} /> On-demand quality lab
-          </span>
+          <span className="eyebrow"><BarChart3 size={14} /> On-demand quality lab</span>
           <h1>Evaluate answer quality</h1>
-          <p>
-            Check whether model answers are relevant and complete. Nothing runs
-            automatically—you choose the dataset, models, judge, and timing.
-          </p>
+          <p>Upload your JSONL datasets, select the files to evaluate, and compare answer models.</p>
         </div>
         <div className="evaluation-assurance">
-          <ShieldCheck size={19} />
-          <div>
-            <strong>Manual by design</strong>
-            <span>Evaluation only starts when you click Run</span>
-          </div>
+          <ShieldCheck size={19} /><div><strong>Your evaluation data</strong><span>Only selected files run when you click Run Evaluation</span></div>
         </div>
       </div>
-
       <form className="evaluation-config" onSubmit={runEvaluation}>
         <section className="config-primary">
           <div className="section-number">01</div>
           <div className="config-content">
-            <div className="config-heading">
-              <div>
-                <span>Evaluation data</span>
-                <h2>Select an evaluation dataset</h2>
-              </div>
-              <button
-                type="button"
-                className="text-button"
-                onClick={toggleDatasetBuilder}
-              >
-                {showDatasetBuilder ? <X size={15} /> : <Sparkles size={15} />}
-                {showDatasetBuilder ? 'Close generator' : 'Configure generator'}
-              </button>
-            </div>
-            <label className="field-label" htmlFor="dataset-name">
-              Dataset name
-            </label>
-            <div className="dataset-field">
-              <Database size={17} />
-              <input
-                id="dataset-name"
-                value={datasetName}
-                onChange={(event) => {
-                  setDatasetName(event.target.value)
-                  setDatasetDeleteTarget(null)
-                  deleteDatasetMutation.reset()
-                }}
-                placeholder="employee-policies"
-                pattern="[A-Za-z0-9][A-Za-z0-9_-]*"
-                maxLength={64}
-                required
-              />
-              <button
-                className="dataset-delete-button"
-                type="button"
-                aria-label="Delete selected evaluation dataset"
-                title="Delete selected dataset"
-                onClick={() => {
-                  deleteDatasetMutation.reset()
-                  setDatasetDeleteTarget(datasetName.trim())
-                }}
-                disabled={
-                  !datasetName.trim() ||
-                  activeDataset ||
-                  activeEvaluation ||
-                  deleteDatasetMutation.isPending
-                }
-              >
-                <Trash2 size={15} />
-              </button>
-            </div>
-            <small className="field-help">
-              Enter the name of a generated dataset, or generate a new one.
-            </small>
-            {datasetDeleteTarget && (
-              <div className="dataset-delete-confirmation" role="alert">
-                <AlertTriangle size={17} />
-                <span>
-                  <strong>Delete {datasetDeleteTarget}.jsonl?</strong>
-                  <small>
-                    This permanently removes the generated evaluation dataset.
-                    Ingested source documents are not affected.
-                  </small>
-                </span>
-                <div>
-                  <button
-                    className="secondary-button"
-                    type="button"
-                    onClick={() => setDatasetDeleteTarget(null)}
-                    disabled={deleteDatasetMutation.isPending}
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    className="dataset-delete-confirm-button"
-                    type="button"
-                    onClick={() =>
-                      deleteDatasetMutation.mutate(datasetDeleteTarget)
-                    }
-                    disabled={deleteDatasetMutation.isPending}
-                  >
-                    {deleteDatasetMutation.isPending ? (
-                      <i className="spinner" />
-                    ) : (
-                      <Trash2 size={15} />
-                    )}
-                    {deleteDatasetMutation.isPending
-                      ? 'Deleting dataset'
-                      : 'Delete dataset'}
-                  </button>
-                </div>
-              </div>
-            )}
-            {deleteDatasetMutation.isError && (
-              <div className="dataset-delete-notice error" role="alert">
-                <XCircle size={16} />
-                <span>
-                  <strong>Dataset could not be deleted.</strong>
-                  <small>{deleteDatasetMutation.error.message}</small>
-                </span>
-              </div>
-            )}
-            {deleteDatasetMutation.isSuccess && (
-              <div className="dataset-delete-notice success" role="status">
-                <CheckCircle2 size={16} />
-                <span>
-                  <strong>Dataset deleted.</strong>
-                  <small>{deleteDatasetMutation.data.message}</small>
-                </span>
-              </div>
-            )}
-            <div className="dataset-quality-warning" role="note">
-              <AlertTriangle size={15} />
-              <span>
-                <strong>Dataset quality matters.</strong> Questions must be clear
-                and representative for the evaluation results to be useful.
-              </span>
-            </div>
+            <div className="config-heading"><div><span>Evaluation Datasets</span><h2>Dataset library</h2></div></div>
+            {library.isLoading && <p role="status">Loading datasets…</p>}
+            {library.isError && <p role="alert" className="error-banner">{library.error.message}</p>}
+            <EvaluationDatasets datasets={datasets} selected={selected} onChange={changeSelection} busy={activeEvaluation} />
           </div>
         </section>
-
         <section className="config-primary">
           <div className="section-number">02</div>
           <div className="config-content">
-            <div className="config-heading">
-              <div>
-                <span>Models under test</span>
-                <h2>Choose answer providers</h2>
-              </div>
-              <span className="selection-count">{answerProviders.length} selected</span>
-            </div>
-            <ProviderPicker selected={answerProviders} onChange={setAnswerProviders} />
+            <div className="config-heading"><div><span>JSONL Developer Reference</span><h2>Create your evaluation files</h2></div></div>
+            <EvaluationReference />
           </div>
         </section>
-
         <section className="config-primary">
           <div className="section-number">03</div>
+          <div className="config-content">
+            <div className="config-heading"><div><span>LLM Provider Configuration</span><h2>API keys and models</h2></div></div>
+            <EvaluationProviderStatus configurations={credentials.configurations} loading={credentials.isLoading}
+              error={credentials.isError} onRetry={() => credentials.refetch()} />
+          </div>
+        </section>
+        <section className="config-primary">
+          <div className="section-number">04</div>
+          <div className="config-content">
+            <div className="config-heading"><div><span>Evaluation Configuration</span><h2>Choose answer providers</h2></div>
+              <span className="selection-count">{answerProviders.length} selected</span></div>
+            <ProviderPicker selected={answerProviders} onChange={changeAnswerProviders}
+              configurations={credentials.configurations} loading={credentials.isLoading} />
+          </div>
+        </section>
+        <section className="config-primary">
+          <div className="section-number" aria-hidden="true" />
           <div className="config-content config-split">
             <div>
-              <div className="config-heading">
-                <div>
-                  <span>Independent grader</span>
-                  <h2>Choose the judge model</h2>
-                </div>
-              </div>
+              <div className="config-heading"><div><span>Independent grader</span><h2>Choose the judge model</h2></div></div>
               <label className="select-field">
                 <Sparkles size={17} />
-                <select
-                  value={judgeProvider}
-                  onChange={(event) => setJudgeProvider(event.target.value as Provider)}
-                >
-                  {PROVIDERS.map((provider) => (
-                    <option value={provider.id} key={provider.id}>
-                      {provider.name}
+                <select aria-label="Judge provider" value={judgeProvider} onChange={(event) => changeJudgeProvider(event.target.value as Provider | '')}>
+                  <option value="">Choose a configured judge</option>
+                  {PROVIDERS.map((provider) => {
+                    const configuration = credentials.configurations.find((item) => item.provider === provider.id)!
+                    return <option value={provider.id} key={provider.id} disabled={credentials.isLoading || configuration.status !== 'configured'}>
+                      {provider.name} · {configuration.model_name || 'No model'} · {PROVIDER_STATUS_LABELS[configuration.status]}
                     </option>
-                  ))}
-                </select>
-                <ChevronDown size={16} />
+                  })}
+                </select><ChevronDown size={16} />
               </label>
-              <small className="field-help">
-                The judge checks whether each answer is relevant to the question
-                and includes all information needed from the retrieved documents.
-              </small>
+              <small className="field-help">The judge grades answers against your references and retrieved evidence.</small>
             </div>
             <div className="retrieval-compact-panel">
-              <div className="config-heading">
-                <div>
-                  <span>Evidence search</span>
-                  <h2>Retrieval controls</h2>
-                </div>
-              </div>
+              <div className="config-heading"><div><span>Evidence search</span><h2>Retrieval controls</h2></div></div>
               <StrategyControls value={retrieval} onChange={setRetrieval} compact />
             </div>
           </div>
         </section>
-
         <div className="run-bar">
-          <div>
-            <Layers3 size={18} />
-            <span>
-              <strong>{datasetName || 'No dataset selected'}</strong>
-              {answerProviders.length} answer model{answerProviders.length === 1 ? '' : 's'} ·{' '}
-              {providerName(judgeProvider)} judge
-            </span>
-          </div>
-          <button
-            className="primary-button"
-            type="submit"
-            disabled={
-              activeEvaluation ||
-              !datasetName.trim() ||
-              Boolean(datasetDeleteTarget) ||
-              deleteDatasetMutation.isPending
-            }
-          >
+          <div><Layers3 size={18} /><span><strong>{selected.length} dataset(s) selected</strong>
+            {answerProviders.length} answer models · {judgeProvider ? providerName(judgeProvider) : 'No'} judge</span></div>
+          <button className="primary-button" type="submit" disabled={activeEvaluation || checkingBeforeRun || credentials.isLoading || Boolean(configurationError)}>
             {activeEvaluation ? <i className="spinner" /> : <Play size={17} />}
-            {activeEvaluation ? 'Evaluation running' : 'Run evaluation'}
+            {activeEvaluation ? 'Evaluation running' : checkingBeforeRun ? 'Checking credentials…' : 'Run Evaluation'}
           </button>
         </div>
+        {(credentialValidationError || configurationError) && <div className="evaluation-configuration-notice" role={credentialValidationError ? 'alert' : 'status'}>
+          <span>{credentialValidationError || configurationError}</span> <Link to="/settings">Configure in Settings</Link>
+        </div>}
       </form>
-
-      {showDatasetBuilder && (
-        <section className="dataset-builder" ref={datasetBuilderRef}>
-          <div className="dataset-builder-heading">
-            <div className="builder-icon">
-              <FilePlus2 size={20} />
-            </div>
-            <div>
-              <span>Evaluation dataset</span>
-              <h2>Generate evaluation cases</h2>
-              <p>
-                The app reads the ingested corpus and creates a balanced,
-                categorized evaluation dataset on demand.
-              </p>
-            </div>
-          </div>
-          <form className="builder-grid" onSubmit={generateDataset}>
-            <div className="questions-field">
-              <span>Balanced category coverage</span>
-              <div className="generated-category-grid">
-                {CATEGORIES.map((category) => (
-                  <span key={category.id}>{category.label}</span>
-                ))}
-              </div>
-              <label className="question-count-field">
-                <span>Questions per category</span>
-                <input
-                  type="number"
-                  min={1}
-                  max={5}
-                  value={questionsPerCategory}
-                  onChange={(event) => {
-                    const value = event.target.valueAsNumber
-                    if (Number.isInteger(value) && value >= 1 && value <= 5) {
-                      setQuestionsPerCategory(value)
-                    }
-                  }}
-                />
-              </label>
-              <small>
-                {questionsPerCategory * CATEGORIES.length} questions will be
-                generated from stored ingestion chunks. No generation runs until
-                you select Generate dataset.
-              </small>
-            </div>
-            <div className="builder-options">
-              <label>
-                <span>Dataset name</span>
-                <div className="builder-filename">
-                  <input
-                    value={datasetName}
-                    onChange={(event) => {
-                      setDatasetName(event.target.value)
-                      setDatasetDeleteTarget(null)
-                      deleteDatasetMutation.reset()
-                    }}
-                    pattern="[A-Za-z0-9][A-Za-z0-9_-]*"
-                    maxLength={64}
-                    required
-                  />
-                </div>
-              </label>
-              <label>
-                <span>Dataset generator model</span>
-                <select
-                  value={referenceProvider}
-                  onChange={(event) => setReferenceProvider(event.target.value as Provider)}
-                >
-                  {PROVIDERS.map((provider) => (
-                    <option value={provider.id} key={provider.id}>
-                      {provider.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <button
-                className={overwrite ? 'checkbox-row checked' : 'checkbox-row'}
-                type="button"
-                onClick={() => setOverwrite((value) => !value)}
-              >
-                <i>{overwrite && <Check size={13} />}</i>
-                <span>
-                  <strong>Overwrite existing dataset</strong>
-                  <small>Replace a generated dataset with the same name</small>
-                </span>
-              </button>
-              <div className="warning-note">
-                <AlertTriangle size={16} />
-                <span>
-                  Generated questions and categories require human review.
-                  Unclear cases can make evaluation results unreliable.
-                </span>
-              </div>
-              <button
-                className="secondary-button"
-                type="submit"
-                disabled={
-                  activeDataset ||
-                  !datasetName.trim() ||
-                  Boolean(datasetDeleteTarget) ||
-                  deleteDatasetMutation.isPending
-                }
-              >
-                {activeDataset ? <i className="spinner dark" /> : <FilePlus2 size={16} />}
-                {activeDataset ? 'Generating dataset' : 'Generate dataset'}
-              </button>
-            </div>
-          </form>
-        </section>
-      )}
-
-      {datasetMutation.isError && (
-        <div className="error-banner" role="alert">
-          <strong>Dataset generation could not start.</strong>
-          <span>{datasetMutation.error.message}</span>
+      {evaluationMutation.isError && <div className="error-banner" role="alert"><strong>Evaluation could not start.</strong><span>{evaluationMutation.error.message}</span></div>}
+      {evaluationStatus.isError && <div className="error-banner" role="alert">{evaluationStatus.error.message}
+        <button type="button" className="text-button" onClick={() => evaluationStatus.refetch()}>Retry status</button>
+      </div>}
+      {evaluationStatus.data && evaluationStatus.data.status !== 'completed' && <>
+        <JobProgress label="Selected dataset evaluation" status={evaluationStatus.data.status} error={evaluationStatus.data.error} />
+        {evaluationStatus.data.total_cases > 0 && <div className="dataset-upload-progress" role="status">
+          <progress value={evaluationStatus.data.completed_cases} max={evaluationStatus.data.total_cases} aria-label="Evaluation progress" />
+          <span>{evaluationStatus.data.completed_cases} / {evaluationStatus.data.total_cases} model answers processed</span>
+        </div>}
+      </>}
+      {completedBatch && visibleRun ? <>
+        <div className="evaluation-result-scope">
+          <label htmlFor="result-dataset">Results for</label>
+          <select id="result-dataset" value={resultScope} onChange={(event) => setResultScope(event.target.value)}>
+            <option value="aggregate">Aggregated summary · {completedBatch.datasets.length} datasets</option>
+            {completedBatch.datasets.map((run) => <option key={run.dataset_id} value={run.dataset_id ?? ''}>{run.dataset_name} · {run.dataset_id}</option>)}
+          </select>
         </div>
-      )}
-      {datasetStatus.data && (
-        <JobProgress
-          label="Evaluation dataset"
-          status={datasetStatus.data.status}
-          error={datasetStatus.data.error}
-        />
-      )}
-
-      {evaluationMutation.isError && (
-        <div className="error-banner" role="alert">
-          <strong>Evaluation could not start.</strong>
-          <span>{evaluationMutation.error.message}</span>
-        </div>
-      )}
-      {evaluationStatus.data && evaluationStatus.data.status !== 'completed' && (
-        <JobProgress
-          label="On-demand evaluation"
-          status={evaluationStatus.data.status}
-          error={evaluationStatus.data.error}
-        />
-      )}
-
-      {completedRun ? (
-        <EvaluationDashboard run={completedRun} />
-      ) : (
-        !activeEvaluation && (
-          <div className="evaluation-empty-state">
-            <div className="empty-visual">
-              <BarChart3 size={27} />
-              <i />
-              <i />
-              <i />
-              <i />
-            </div>
-            <h2>Your results will appear here</h2>
-            <p>
-              Run an evaluation to compare model quality across retrieval and
-              reasoning categories, inspect every score, and review cost and latency.
-            </p>
-            <div>
-              {CATEGORIES.map((category) => (
-                <span key={category.id}>{category.label}</span>
-              ))}
-            </div>
-          </div>
-        )
-      )}
+        <EvaluationDashboard key={visibleRun.run_id} run={visibleRun} />
+      </> : !activeEvaluation && <div className="evaluation-empty-state">
+        <BarChart3 size={27} /><h2>Your results will appear here</h2>
+        <p>Select datasets and run an evaluation to inspect scores, individual answers, cost, and latency.</p>
+      </div>}
     </div>
   )
 }

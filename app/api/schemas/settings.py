@@ -1,6 +1,7 @@
 """Schemas for encrypted LLM provider settings."""
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field, SecretStr, field_validator
 
@@ -31,5 +32,14 @@ class ProviderCredentialResponse(BaseModel):
     updated_at: datetime
 
 
+class ProviderConfigurationStatus(BaseModel):
+    provider: LLMProvider
+    model_name: str | None = None
+    expires_at: datetime | None = None
+    status: Literal["configured", "not_configured", "expired", "unavailable"]
+    message: str
+
+
 class ProviderCredentialListResponse(BaseModel):
     credentials: list[ProviderCredentialResponse]
+    providers: list[ProviderConfigurationStatus]

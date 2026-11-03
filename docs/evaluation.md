@@ -1,178 +1,201 @@
 # RAG quality evaluation
 
-The evaluation subsystem measures the retrieval and answer-generation pipeline
-against a versioned JSONL ground-truth dataset. It is explicitly triggered and
-never runs as a side effect of ingestion, retrieval, or normal chat.
+Evaluation uses JSONL files supplied by users. The application does not create
+questions, reference answers, or ground-truth datasets. Evaluation runs only when
+explicitly requested and is separate from document ingestion and employee chat.
 
-## Prerequisites
+## Workflow
 
-Before evaluating:
+1. Complete document ingestion and configure answer and judge provider credentials.
+2. Start Redis and the worker (`uv run employee-rag-worker`), or use Docker Compose.
+3. Open **Developer Mode → Evaluation**.
+4. Drop one or more `.jsonl` files into the dataset library or select **Upload datasets**.
+5. Inspect validation feedback and preview the stored records.
+6. Check the files you want to evaluate; **Select All** includes valid files only.
+   **Clear Selection** deselects every file. Uploading more files preserves the library.
+7. Choose answer providers, a judge provider, and retrieval strategies. At least
+   one of semantic or keyword search must be enabled.
+8. Click **Run Evaluation**. Only the selected dataset IDs are sent to the worker.
+9. Use **Results for** to inspect the aggregate or an individual dataset.
 
-1. Complete document ingestion.
-2. Configure every provider that will generate references, answer questions, or
-   judge results.
-3. Start Redis and the evaluation worker:
+Files with the same filename receive different stable dataset IDs and never
+replace one another. Deleting one library entry removes only that dataset.
+Selection and the latest accepted job are retained in browser local storage.
+Jobs continue during navigation and page reloads; the browser resumes polling.
 
-```bash
-uv run employee-rag-worker
-```
+## Provider configuration and preflight validation
 
-4. Decide which retrieval configuration should be tested.
+The **LLM Provider Configuration** section displays Google Gemini, OpenAI,
+Anthropic, and Grok (xAI), including their saved model and configuration status.
+It uses the existing `GET /api/v1/settings/providers` endpoint; no API keys are
+sent to the browser. Statuses are:
 
-The frontend uses asynchronous jobs so that long-running model calls do not
-block an HTTP request.
+| Label | Meaning |
+| --- | --- |
+| Configured (green) | A saved, non-expired key and nonblank model are present |
+| API Key Not Configured (red) | No usable saved key or model; the message identifies what to configure |
+| API Key Expired (amber) | The saved credential has expired |
+| Configuration Unavailable | The backend could not report status; evaluations remain blocked |
 
-## Create a dataset
+Configured describes local saved state, not external provider verification.
+Use **Configure in Settings** to navigate explicitly. The page shows separate
+loading and retrieval-error states and offers retry on failure. It shares the
+Settings credential query cache, refreshes on returning to the page/window and
+every 15 seconds, and refreshes at the next known expiry. Background status
+failures override cached configured status. Dataset and provider selections are
+preserved when credentials become unavailable, including navigation to Settings.
+An unavailable answer provider already selected may be deselected, but cannot
+be newly selected. Unavailable judges cannot be newly selected.
 
-There are two supported generation workflows. The customer-facing frontend
-generates the JSONL internally instead of asking users to prepare or upload it.
+Immediately before submission, the frontend fetches credential status again.
+The synchronous and asynchronous endpoints validate all selected answer and judge
+providers, including saved model, expiry, and decryptability. The worker repeats
+the validation when execution starts. Invalid selections return an actionable,
+provider-specific error without queuing a job or making provider calls. Status
+lookup failures return `503`; missing/expired credentials or models return `422`.
+Keys never appear in job payloads or results. A provider may still reject a
+locally configured key during a real model call.
 
-### Generate from the frontend
+Expired secrets are cleared when read and by the periodic cleanup task. Only
+provider/model/expiry metadata remains, enabling the amber expired status.
+Replacement updates the same saved provider; explicit deletion removes its
+metadata as well. Credentials deleted by older application versions cannot be
+retroactively distinguished from credentials that were never saved.
 
-1. Open **Evaluation** in Developer mode.
-2. Select dataset generation.
-3. Enter a dataset name and choose one to five questions per category.
-4. Select the reference provider.
-5. Select the retrieval strategies.
-6. Queue generation and wait for the worker.
+## Example JSONL Template
 
-To remove a stored dataset, enter or select its name on the Evaluation page,
-choose the trash action beside the dataset field, and confirm the deletion.
-Deleting evaluation ground truth does not remove ingested source documents.
+The **JSONL Developer Reference** section provides **View Example**,
+**Download Example JSONL**, **Copy JSONL**, and **View schema documentation**.
+The formatted preview and raw copyable source use the same backend download
+endpoint and tracked file:
+`examples/evaluation_dataset.example.jsonl`.
+It contains five fictional Cedar Lane Labs cases: direct fact, procedure,
+multiple facts (`spanning`), numerical reasoning, and an unanswerable question.
+It demonstrates expected keywords, facts, evidence content, and optional metadata
+without document IDs, chunk IDs, fingerprints, or model provenance. The numerical
+case omits evidence deliberately to demonstrate unavailable retrieval metrics.
+Replace fictional policies with your own reviewed references for meaningful scores.
 
-The worker reuses the cleaned documents and structured-data artifacts retained
-by ingestion. It selects source-diverse excerpts and asks the reference provider
-to generate balanced questions across all nine categories in bounded batches.
-The generator identifies the source excerpts supporting each answerable question;
-those anchors are preserved when retrieval evidence is added, so a retrieval miss
-does not incorrectly turn an answerable case into an unanswerable one. The worker
-then produces an answerability decision, expected keywords, reference answer,
-required facts, and relevant evidence positions.
-Generation starts only when **Generate dataset** is selected. One to five
-questions per category produces 9 to 45 records.
+`GET /api/v1/evaluations/reference/example` returns that file verbatim as a UTF-8
+attachment. `GET /api/v1/evaluations/reference/schema` returns the actual record
+JSON Schema, supported categories, and configured file/record/upload limits.
+The existing upload schema and evaluation scoring rules are unchanged.
 
-### Generate from the command line
+## JSONL schema
 
-Create a questions file containing one JSON object per line:
+Use UTF-8 (an optional UTF-8 BOM is accepted), with one JSON object per nonempty
+line. Blank lines are ignored. Every record requires two nonblank strings:
 
 ```jsonl
-{"question":"How many vacation days do employees receive?"}
-{"question":"What is the remote work policy?"}
+{"question":"How many vacation days do employees receive?","reference_answer":"Employees receive 15 vacation days annually."}
+{"id":"unknown-office-code","question":"What is the office access code?","reference_answer":"The documents do not provide this information.","answerable":false}
 ```
 
-An example is included at `evaluation_questions.example.jsonl`.
+These sample facts are illustrative; supply references that match your corpus.
+A fuller example is available at [examples/evaluation_dataset.example.jsonl](../examples/evaluation_dataset.example.jsonl).
 
-Run:
-
-```bash
-uv run employee-rag-generate-eval \
-  --dataset employee-policies \
-  --questions evaluation_questions.example.jsonl \
-  --reference-provider openai \
-  --reranking
-```
-
-Optional Boolean flags include semantic search, keyword search, query rewriting,
-reranking, and source diversity. Each flag also accepts its `--no-...` form.
-Use `--overwrite` only when replacing a dataset intentionally.
-
-## Ground-truth records
-
-Each record contains:
-
-- Stable record ID and schema version
-- Question, answerability, evaluation category, and expected keywords
-- Reference answer and atomic required facts
-- Retrieved and relevant evidence snapshots
-- Chunk IDs, sources, sections, positions, and content hashes
-- Evidence and corpus fingerprints
-- Reference provider, model, generation time, and usage
-- Retrieval configuration used during generation
-- Review status
-
-The reference model assigns one primary category to every generated record:
-`direct_fact`, `temporal`, `spanning`, `relationship`, `numerical`,
-`comparative`, `holistic`, `procedural`, or `unanswerable`. These stored
-categories are carried into evaluation results and drive the category
-performance chart; the frontend does not infer them from question wording.
-
-Generated records start with `review_status: machine_generated`. After verifying
-the question, answer, facts, and evidence, change the status to `approved`. Do
-not treat a machine-generated reference as authoritative without review.
-
-## Freshness checking
-
-Evidence and corpus fingerprints connect an evaluation record to the indexed
-data from which it was generated.
-
-| Status | Meaning |
+| Field | Requirement / default |
 | --- | --- |
-| `current` | Its evidence still matches the current corpus |
-| `stale` | Relevant evidence or corpus content has changed |
-| `unverifiable` | The current system cannot prove freshness |
+| `question` | Required string, at most 2,000 characters |
+| `reference_answer` | Required nonblank string, including an expected abstention for unanswerable cases |
+| `id` | Optional nonblank string, unique within the file; defaults to `line-N` using the physical line number |
+| `answerable` | Optional boolean, defaults to `true`; use `false` for unanswerable questions |
+| `category` | Optional; defaults to `direct_fact`. Other values: `temporal`, `spanning`, `relationship`, `numerical`, `comparative`, `holistic`, `procedural`, `unanswerable` |
+| `keywords` / `expected_keywords` | Optional list of strings |
+| `required_facts` | Optional list of atomic reference facts |
+| `relevant_evidence` / `reference_evidence` | Optional list of evidence objects, described below |
+| `metadata` | Optional object for user-defined metadata |
+| `review_status` | Defaults to `user_provided`; legacy `approved` and `machine_generated` values remain accepted |
 
-Stale records have `passed: null` and are excluded from pass-rate aggregates.
-Regenerate and review the dataset after material source-data changes.
+An `answerable:false` record is categorized as `unanswerable`; it must have empty
+`required_facts` and relevant evidence. Answerable records cannot use the
+`unanswerable` category. Keywords are cleared for unanswerable records.
 
-## Run an evaluation
+Each reference evidence object requires a nonempty `content` string. Optional
+fields include `position` (positive integer, default 1), `chunk_id`, `source_file`,
+`source_type`, `section`, `chunk_index`, `content_sha256`, and `source_sha256`.
+The parser calculates a missing content hash from supplied evidence; this hashes
+user-provided content and does not invent ground truth. Supplied hashes and
+fingerprints are verified. Chunk metrics compare exact evidence content hashes;
+source precision/recall additionally need `source_file` values. No reference
+evidence means retrieval metrics are `null` and the result explains why.
 
-From the frontend:
+Existing schema versions 1 and 2 remain accepted, including `retrieved_evidence`,
+`evidence_fingerprint`, `corpus_fingerprint`, `generated_at`, `reference_provider`,
+`reference_model`, `reference_usage`, and `retrieval`. These provenance fields
+are optional; no reference provider is invoked to fill them. When retrieved and
+relevant evidence are both supplied, relevant evidence must belong to the
+retrieved snapshots, preserving validation of legacy records.
 
-1. Select a stored dataset.
-2. Select one to four answer providers.
-3. Select a judge provider.
-4. Choose retrieval strategies.
-5. Start the run and wait for its job result.
+## Validation and persistence
 
-Each answer provider receives the same question and retrieval configuration. The
-judge provider assesses qualities that require semantic judgment, while
-deterministic code calculates retrieval, citation, similarity, timing, and
-usage metrics.
+Malformed JSON, non-object records, missing required fields, duplicate record
+IDs, contradictory answerability, and evidence hash mismatches are rejected
+with the physical line number. Invalid UTF-8, empty files, unsupported extensions,
+and unsafe filenames are also rejected. Invalid files are never partially saved.
+A mixed upload batch retains valid files and reports each invalid file separately.
 
-## Metrics
+| Environment variable | Default |
+| --- | --- |
+| `MAX_EVALUATION_DATASET_SIZE` | 10,485,760 bytes (10 MiB) per file |
+| `MAX_EVALUATION_RECORDS` | 100 per file |
+| `MAX_EVALUATION_UPLOAD_FILES` | 5 files per upload |
+
+Set the same limits for API and worker. Docker Compose forwards these variables
+from the shell or `.env`. If raising total upload sizes, also adjust nginx's
+`client_max_body_size` (55 MB by default).
+
+Each new upload is stored as `evaluation_data/<dataset_id>/dataset.jsonl` with
+`metadata.json`. The original bytes, original filename, record count, byte size,
+upload time, and validation state remain available after application restarts.
+The API and worker share the persistent `evaluation_data/` Docker bind mount.
+Existing flat `evaluation_data/<name>.jsonl` files remain discoverable, with their
+original stem as their stable ID and filesystem modification time as upload time.
+
+## Evaluation and reporting
+
+All selected files are validated before evaluation starts. Queued jobs retain
+the selected IDs and content hashes. If a selected file disappears or changes
+before processing, the job fails explicitly; it never substitutes another file.
+Each selected dataset runs independently. Every case carries its dataset ID and
+filename, so repeated filenames or record IDs across files remain distinct.
+
+The response includes `datasets` (individual runs) and `aggregate` (one combined
+run). Aggregate provider averages, pass rates, latency, token counts, and cost
+are calculated from all individual cases, rather than averaging dataset averages.
+Unavailable metrics are excluded from averages. Errored cases are reported
+separately from passed and failed cases.
 
 | Category | Metrics |
 | --- | --- |
-| Retrieval | Precision@K, Recall@K, reciprocal rank, average precision@K, nDCG@K, source precision, source recall |
-| Answer | Correctness, groundedness, completeness, relevance, overall score |
-| Citation | Citation accuracy, citation coverage, deterministic citation validity |
-| Behavior | Abstention correctness, unsupported claims, missing facts |
-| Similarity | Lexical similarity and local-embedding semantic similarity |
-| Operations | Retrieval, answer, grading, and total latency |
-| Usage | Input, cached input, cache creation, output, and total tokens |
-| Cost | Per-call and aggregate approximate USD cost when model pricing is available |
+| Retrieval | Precision@K, Recall@K, reciprocal rank, average precision@K, nDCG@K, source precision and recall when reference evidence exists |
+| Answer | LLM judge completeness, relevance, correctness, groundedness, missing facts, unsupported claims |
+| Citation | Deterministic validity of numbered citations against retrieved evidence |
+| Similarity | Lexical similarity and local-embedding cosine similarity against the supplied reference |
+| Behavior | Judge abstention score for unanswerable questions; unavailable for answerable questions |
+| Operations | Retrieval, answer generation, grading, and total latency |
+| Usage and cost | Input, cached input, cache creation, output, total tokens, and estimated USD cost where pricing is known |
 
-An answer passes when overall, correctness, and groundedness are each at least
-`0.80`.
+An answer passes when completeness and relevance are each at least `0.80`,
+preserving the existing pass rule. Additional metrics do not change that rule.
+Optional judge metrics are `null` if absent from a judge response; semantic
+similarity is `null` with a warning if the embedding model is unavailable.
+The dashboard keeps provider comparisons and category charts and exposes the
+reference answer, generated answer, metric scores, and warnings for each case.
 
-Provider summaries report evaluated, passed, failed, errored, stale, and
-unreviewed counts, plus averages, pass rate, latency, usage, and cost.
+Legacy evidence/corpus fingerprints still report `current`, `stale`, or
+`unverifiable` freshness. Freshness is reported alongside scores; review stale
+references manually after corpus changes. User-authored records without freshness
+hashes normally report `unverifiable` and remain evaluable.
 
-## Job lifecycle
+## Jobs
 
-Asynchronous requests return a job ID and status URL. Possible states include
-`queued`, `running`, `completed`, `failed`, `deferred`, `scheduled`, `stopped`,
-and `canceled`.
+`POST /api/v1/evaluations/run/async` returns a job ID and status URL. Polling
+reports `queued`, `running`, `completed`, `failed`, `deferred`, `scheduled`,
+`stopped`, or `canceled`, plus completed/total model-answer counts and the current
+dataset ID. The result is returned inside `result` when the job completes.
+Redis retains results for 24 hours by default; preserve important reports before
+expiry. Persist Redis storage to retain job state across service restarts.
 
-Successful jobs return the normal operation result inside `result`. Failed jobs
-return a safe error. Redis retains job success and failure results for 24 hours
-by default, so record important results before they expire.
-
-The frontend stores the latest accepted dataset-generation and evaluation job
-IDs locally. Navigating to another page, using chat, or closing the Evaluation
-page does not cancel a queued or running worker job. Opening Evaluation again
-restores the job, resumes status polling, and loads its result from Redis. The
-browser is only observing the job; execution belongs to the RQ worker.
-
-## Limitations
-
-- LLM judges can be inconsistent or biased toward particular styles or model
-  families.
-- Generated ground truth can contain errors.
-- Approximate cost may differ from provider invoices.
-- A small question set may not represent actual employee usage.
-- High retrieval scores do not guarantee policy correctness.
-- Evaluation should support, not replace, expert and user review.
-
-Use diverse, approved questions that cover normal, ambiguous, unanswerable, and
-high-risk cases.
+LLM grading and estimated cost have practical uncertainty. Use representative,
+reviewed reference files and inspect failures before making quality decisions.

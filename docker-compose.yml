@@ -41,6 +41,10 @@ services:
     command: ["employee-rag-system"]
     init: true
     restart: unless-stopped
+    environment: &evaluation_limits
+      MAX_EVALUATION_DATASET_SIZE: ${MAX_EVALUATION_DATASET_SIZE:-10485760}
+      MAX_EVALUATION_RECORDS: ${MAX_EVALUATION_RECORDS:-100}
+      MAX_EVALUATION_UPLOAD_FILES: ${MAX_EVALUATION_UPLOAD_FILES:-5}
     ports:
       - "127.0.0.1:8000:8000"
     volumes:
@@ -77,6 +81,7 @@ services:
     command: ["employee-rag-worker"]
     init: true
     restart: unless-stopped
+    environment: *evaluation_limits
     volumes:
       - ./data:/app/data
       - ./structured_data:/app/structured_data

@@ -2,15 +2,17 @@
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Literal
+from typing import Any, Literal
+from uuid import uuid4
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 
 from app.api.llm import LLMProvider
 from app.api.llm_usage import LLMUsage, LLMUsageSummary, summarize_llm_usage
 
 
 class ReviewStatus(StrEnum):
+    USER_PROVIDED = "user_provided"
     MACHINE_GENERATED = "machine_generated"
     APPROVED = "approved"
 
@@ -50,10 +52,10 @@ class RetrievalConfiguration(BaseModel):
 
 
 class EvidenceSnapshot(BaseModel):
-    position: int = Field(ge=1)
+    position: int = Field(default=1, ge=1)
     chunk_id: str | None = None
-    content: str
-    content_sha256: str
+    content: str = Field(min_length=1)
+    content_sha256: str | None = None
     source_file: str | None = None
     source_type: str | None = None
     source_sha256: str | None = None
@@ -63,23 +65,37 @@ class EvidenceSnapshot(BaseModel):
 
 class GroundTruthRecord(BaseModel):
     schema_version: Literal[1, 2] = 2
-    id: str
-    question: str
-    answerable: bool
-    reference_answer: str
+    id: str = Field(default_factory=lambda: str(uuid4()), min_length=1)
+    question: str = Field(min_length=1, max_length=2_000)
+    answerable: bool = True
+    reference_answer: str = Field(min_length=1)
     category: EvaluationCategory = EvaluationCategory.DIRECT_FACT
-    keywords: list[str] = Field(default_factory=list, max_length=8)
-    required_facts: list[str]
+    keywords: list[str] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("keywords", "expected_keywords"),
+    )
+    required_facts: list[str] = Field(default_factory=list)
     retrieved_evidence: list[EvidenceSnapshot] = Field(default_factory=list)
-    relevant_evidence: list[EvidenceSnapshot]
-    evidence_fingerprint: str
+    relevant_evidence: list[EvidenceSnapshot] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("relevant_evidence", "reference_evidence"),
+    )
+    evidence_fingerprint: str | None = None
     corpus_fingerprint: str | None = None
-    generated_at: datetime
-    reference_provider: LLMProvider
-    reference_model: str
+    generated_at: datetime | None = None
+    reference_provider: LLMProvider | None = None
+    reference_model: str | None = None
     reference_usage: LLMUsage | None = None
-    retrieval: RetrievalConfiguration
-    review_status: ReviewStatus = ReviewStatus.MACHINE_GENERATED
+    retrieval: RetrievalConfiguration = Field(default_factory=RetrievalConfiguration)
+    review_status: ReviewStatus = ReviewStatus.USER_PROVIDED
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("question", "reference_answer", "id")
+    @classmethod
+    def require_nonblank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("must not be blank")
+        return value.strip()
 
     @model_validator(mode="after")
     def align_unanswerable_category(self) -> "GroundTruthRecord":
@@ -93,35 +109,13 @@ class GroundTruthRecord(BaseModel):
         return self
 
 
-class ReferenceDraft(BaseModel):
-    answerable: bool
-    reference_answer: str
-    category: EvaluationCategory
-    keywords: list[str] = Field(default_factory=list, max_length=8)
-    required_facts: list[str] = Field(default_factory=list)
-    relevant_evidence_numbers: list[int] = Field(default_factory=list)
-
-
-class GeneratedEvaluationQuestion(BaseModel):
-    """One corpus-derived question requested for a specific test category."""
-
-    question: str = Field(min_length=1, max_length=2_000)
-    category: EvaluationCategory
-    relevant_evidence_numbers: list[int] = Field(
-        default_factory=list,
-        max_length=8,
-    )
-
-
-class QuestionGenerationDraft(BaseModel):
-    """Structured question-generation response returned by the reference model."""
-
-    questions: list[GeneratedEvaluationQuestion]
-
-
 class JudgeDraft(BaseModel):
     completeness: float = Field(ge=0.0, le=1.0)
     relevance: float = Field(ge=0.0, le=1.0)
+    correctness: float | None = Field(default=None, ge=0.0, le=1.0)
+    groundedness: float | None = Field(default=None, ge=0.0, le=1.0)
+    abstention: float | None = Field(default=None, ge=0.0, le=1.0)
+    unsupported_claims: list[str] = Field(default_factory=list)
     missing_facts: list[str] = Field(default_factory=list)
     rationale: str
 
@@ -140,6 +134,12 @@ class AnswerScores(BaseModel):
     completeness: float
     relevance: float
     overall: float
+    correctness: float | None = None
+    groundedness: float | None = None
+    citation_validity: float | None = None
+    semantic_similarity: float | None = None
+    lexical_similarity: float | None = None
+    abstention: float | None = None
 
 
 class EvaluationTiming(BaseModel):
@@ -150,6 +150,8 @@ class EvaluationTiming(BaseModel):
 
 
 class EvaluationCaseResult(BaseModel):
+    dataset_id: str | None = None
+    dataset_name: str | None = None
     record_id: str
     question: str
     category: EvaluationCategory
@@ -191,6 +193,12 @@ class ScoreAverages(BaseModel):
     completeness: float | None = None
     relevance: float | None = None
     overall: float | None = None
+    correctness: float | None = None
+    groundedness: float | None = None
+    citation_validity: float | None = None
+    semantic_similarity: float | None = None
+    lexical_similarity: float | None = None
+    abstention: float | None = None
 
 
 class ProviderEvaluationSummary(BaseModel):
@@ -211,6 +219,7 @@ class ProviderEvaluationSummary(BaseModel):
 
 class EvaluationRun(BaseModel):
     run_id: str
+    dataset_id: str | None = None
     dataset_name: str
     dataset_sha256: str
     generated_at: datetime
@@ -220,3 +229,9 @@ class EvaluationRun(BaseModel):
     )
     summaries: list[ProviderEvaluationSummary]
     results: list[EvaluationCaseResult]
+
+
+class EvaluationBatchRun(BaseModel):
+    run_id: str
+    datasets: list[EvaluationRun]
+    aggregate: EvaluationRun

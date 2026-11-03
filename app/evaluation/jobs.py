@@ -1,50 +1,37 @@
-"""RQ worker functions for long-running evaluation operations."""
+"""RQ worker for explicitly selected uploaded evaluation datasets."""
 
 import logging
-from typing import Any, Callable
+from typing import Any
 
 from fastapi import HTTPException
-from pydantic import BaseModel
+from rq import get_current_job
 
-from app.api.controllers.evaluation import (
-    generate_evaluation_dataset,
-    run_evaluation_on_demand,
-)
-from app.api.schemas.evaluation import (
-    GenerateEvaluationDatasetRequest,
-    RunEvaluationRequest,
-)
+from app.api.controllers.evaluation import execute_selected_evaluation
+from app.api.schemas.evaluation import RunEvaluationRequest
 
 
 logger = logging.getLogger(__name__)
 
 
-def _run_job(
-    operation: Callable[[Any], BaseModel],
-    request: BaseModel,
-) -> dict[str, Any]:
+def run_evaluation_job(payload: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(payload)
+    expected_hashes = payload.pop("expected_hashes", None)
+    job = get_current_job()
+
+    def progress(completed: int, total: int, dataset_id: str) -> None:
+        if job is not None:
+            job.meta.update(completed_cases=completed, total_cases=total,
+                            current_dataset_id=dataset_id)
+            job.save_meta()
+
     try:
-        response = operation(request)
+        request = RunEvaluationRequest.model_validate(payload)
+        response = execute_selected_evaluation(request, expected_hashes=expected_hashes,
+                                               progress=progress)
     except HTTPException as error:
-        logger.warning("Background evaluation operation rejected: %s", error.detail)
+        logger.warning("Background evaluation rejected: %s", error.detail)
         return {"ok": False, "error": str(error.detail)}
     except Exception as error:
-        logger.exception("Background evaluation operation failed")
-        return {
-            "ok": False,
-            "error": f"Background evaluation failed ({type(error).__name__}).",
-        }
-    return {
-        "ok": True,
-        "result": response.model_dump(mode="json"),
-    }
-
-
-def generate_dataset_job(payload: dict[str, Any]) -> dict[str, Any]:
-    request = GenerateEvaluationDatasetRequest.model_validate(payload)
-    return _run_job(generate_evaluation_dataset, request)
-
-
-def run_evaluation_job(payload: dict[str, Any]) -> dict[str, Any]:
-    request = RunEvaluationRequest.model_validate(payload)
-    return _run_job(run_evaluation_on_demand, request)
+        logger.exception("Background evaluation failed")
+        return {"ok": False, "error": f"Background evaluation failed ({type(error).__name__})."}
+    return {"ok": True, "result": response.model_dump(mode="json")}

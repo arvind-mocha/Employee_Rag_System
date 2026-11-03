@@ -11,6 +11,26 @@ export interface ProviderCredential {
 
 export interface ProviderCredentialListResponse {
   credentials: ProviderCredential[]
+  providers: ProviderConfigurationStatus[]
+}
+
+export interface ProviderConfigurationStatus {
+  provider: Provider
+  model_name: string | null
+  expires_at: string | null
+  status: 'configured' | 'not_configured' | 'expired' | 'unavailable'
+  message: string
+}
+
+export interface EvaluationSchemaReference {
+  maximum_file_size_bytes: number
+  maximum_records: number
+  maximum_upload_files: number
+  categories: string[]
+  record_schema: {
+    required: string[]
+    properties: Record<string, { type?: string; description?: string }>
+  }
 }
 
 export interface ProviderCredentialRequest {
@@ -35,8 +55,38 @@ export interface VectorDatabaseEraseResponse {
 }
 
 export interface DeleteEvaluationDatasetResponse {
-  dataset_name: string
+  dataset_id: string
   message: string
+}
+
+export interface EvaluationDataset {
+  dataset_id: string
+  filename: string
+  record_count: number
+  size_bytes: number
+  uploaded_at: string
+  validation_status: 'valid' | 'invalid'
+  validation_error: string | null
+  dataset_sha256: string
+}
+
+export interface EvaluationDatasetPreview extends EvaluationDataset {
+  records: Array<{
+    id: string
+    question: string
+    reference_answer: string
+    answerable: boolean
+    category: EvaluationCategory
+    keywords: string[]
+    required_facts: string[]
+  }>
+  offset: number
+  limit: number
+}
+
+export interface DatasetUploadResponse {
+  datasets: EvaluationDataset[]
+  errors: Array<{ filename: string; error: string }>
 }
 
 export type IngestionState =
@@ -143,12 +193,24 @@ export interface ScoreAverages {
   completeness: number | null
   relevance: number | null
   overall: number | null
+  correctness: number | null
+  groundedness: number | null
+  citation_validity: number | null
+  semantic_similarity: number | null
+  lexical_similarity: number | null
+  abstention: number | null
 }
 
 export interface AnswerScores {
   completeness: number
   relevance: number
   overall: number
+  correctness: number | null
+  groundedness: number | null
+  citation_validity: number | null
+  semantic_similarity: number | null
+  lexical_similarity: number | null
+  abstention: number | null
 }
 
 export interface RetrievalScores {
@@ -173,6 +235,8 @@ export type EvaluationCategory =
   | 'unanswerable'
 
 export interface EvaluationResult {
+  dataset_id: string | null
+  dataset_name: string | null
   record_id: string
   question: string
   category: EvaluationCategory
@@ -220,6 +284,7 @@ export interface ProviderSummary {
 
 export interface EvaluationRun {
   run_id: string
+  dataset_id: string | null
   dataset_name: string
   dataset_sha256: string
   generated_at: string
@@ -229,16 +294,22 @@ export interface EvaluationRun {
   results: EvaluationResult[]
 }
 
+export interface EvaluationBatchRun {
+  run_id: string
+  datasets: EvaluationRun[]
+  aggregate: EvaluationRun
+}
+
 export interface EvaluationJobAccepted {
   job_id: string
-  job_type: 'dataset_generation' | 'evaluation_run'
+  job_type: 'evaluation_run'
   status: 'queued'
   status_url: string
 }
 
 export interface EvaluationJobStatus {
   job_id: string
-  job_type: 'dataset_generation' | 'evaluation_run'
+  job_type: 'evaluation_run'
   status:
     | 'queued'
     | 'running'
@@ -250,4 +321,7 @@ export interface EvaluationJobStatus {
     | 'canceled'
   result: Record<string, unknown> | null
   error: string | null
+  completed_cases: number
+  total_cases: number
+  current_dataset_id: string | null
 }

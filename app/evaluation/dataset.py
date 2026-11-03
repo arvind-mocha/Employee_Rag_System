@@ -1,10 +1,13 @@
 """Safe JSONL persistence and content-version helpers for evaluations."""
 
 from hashlib import sha256
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 import re
 from typing import Iterable
+from tempfile import TemporaryDirectory
+from uuid import uuid4
 
 from pydantic import ValidationError
 
@@ -40,7 +43,11 @@ def dataset_path(
 ) -> Path:
     name = validate_dataset_name(dataset_name)
     root = directory or config.EVALUATION_DATA_DIRECTORY
-    return root / f"{name}.jsonl"
+    uploaded = root / name / "dataset.jsonl"
+    candidate = uploaded if uploaded.is_file() else root / f"{name}.jsonl"
+    if root.resolve() not in candidate.resolve().parents:
+        raise EvaluationDatasetError("dataset path is outside dataset storage")
+    return candidate
 
 
 def text_sha256(text: str) -> str:
@@ -70,7 +77,8 @@ def indexed_corpus_fingerprint() -> str:
     for label, root in roots:
         if not root.is_dir():
             continue
-        snapshot_file = config.EVALUATION_CORPUS_SNAPSHOT_FILE.resolve()
+        # Ignore the derived snapshot left by older installations.
+        snapshot_file = (config.TEMP_DATA_DIRECTORY / ".evaluation_corpus.json").resolve()
         snapshot_temporary = snapshot_file.with_suffix(
             f"{snapshot_file.suffix}.tmp"
         )
@@ -160,12 +168,6 @@ def _validate_record_integrity(
     record: GroundTruthRecord,
     line_number: int,
 ) -> None:
-    if record.answerable and (
-        not record.required_facts or not record.relevant_evidence
-    ):
-        raise EvaluationDatasetError(
-            f"answerable record lacks facts or evidence at line {line_number}"
-        )
     if not record.answerable and (
         record.required_facts or record.relevant_evidence
     ):
@@ -175,11 +177,13 @@ def _validate_record_integrity(
 
     snapshots = record.retrieved_evidence or record.relevant_evidence
     for evidence in [*record.retrieved_evidence, *record.relevant_evidence]:
-        if text_sha256(evidence.content) != evidence.content_sha256:
+        digest = text_sha256(evidence.content)
+        if evidence.content_sha256 is not None and digest != evidence.content_sha256:
             raise EvaluationDatasetError(
                 f"evidence content hash mismatch at line {line_number}"
             )
-    if evidence_fingerprint(snapshots) != record.evidence_fingerprint:
+        evidence.content_sha256 = digest
+    if record.evidence_fingerprint is not None and evidence_fingerprint(snapshots) != record.evidence_fingerprint:
         raise EvaluationDatasetError(
             f"evidence fingerprint mismatch at line {line_number}"
         )
@@ -231,30 +235,146 @@ def parse_dataset_jsonl(
     try:
         text = content.decode("utf-8-sig")
     except UnicodeDecodeError as error:
+        line_number = content[:error.start].count(b"\n") + 1
         raise EvaluationDatasetError(
-            "the evaluation dataset must be UTF-8 encoded"
+            f"the evaluation dataset must be UTF-8 encoded (line {line_number})"
         ) from error
 
     records = []
-    for line_number, line in enumerate(text.splitlines(), start=1):
+    record_ids = set()
+    # Split physical JSONL lines only; U+2028/U+2029 may occur inside JSON strings.
+    for line_number, line in enumerate(text.split("\n"), start=1):
         if not line.strip():
             continue
         if maximum_records is not None and len(records) >= maximum_records:
             raise EvaluationDatasetError(
                 f"the evaluation dataset cannot contain more than "
-                f"{maximum_records} records"
+                f"{maximum_records} records (line {line_number})"
             )
         try:
-            record = GroundTruthRecord.model_validate_json(line)
+            payload = json.loads(line, parse_constant=_reject_json_constant)
+            if not isinstance(payload, dict):
+                raise ValueError("each record must be a JSON object")
+            payload.setdefault("id", f"line-{line_number}")
+            record = GroundTruthRecord.model_validate(payload)
             _validate_record_integrity(record, line_number)
+            if record.id in record_ids:
+                raise ValueError(f"duplicate record id: {record.id}")
+            record_ids.add(record.id)
             records.append(record)
-        except (ValidationError, json.JSONDecodeError) as error:
+        except (ValidationError, ValueError) as error:
             raise EvaluationDatasetError(
                 f"invalid JSONL record at line {line_number}: {error}"
             ) from error
     if not records:
         raise EvaluationDatasetError("the evaluation dataset is empty")
     return records
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"invalid JSON constant: {value}")
+
+
+def validate_upload_filename(filename: str) -> str:
+    if (
+        not filename or len(filename.encode("utf-8")) > 255
+        or filename != filename.strip()
+        or any(character in filename for character in ("/", "\\"))
+        or any(ord(character) < 32 or ord(character) == 127 for character in filename)
+        or filename in {".jsonl", "..jsonl"}
+    ):
+        raise EvaluationDatasetError("invalid filename; paths are not allowed")
+    if Path(filename).suffix.lower() != ".jsonl":
+        raise EvaluationDatasetError("the evaluation dataset must be a .jsonl file")
+    return filename
+
+
+def store_uploaded_dataset(filename: str, content: bytes) -> dict:
+    """Publish the original file and its metadata together, after full validation."""
+    validate_upload_filename(filename)
+    if len(content) > config.MAX_EVALUATION_DATASET_SIZE:
+        raise EvaluationDatasetError(
+            f"file exceeds the {config.MAX_EVALUATION_DATASET_SIZE} byte upload limit"
+        )
+    records = parse_dataset_jsonl(content, maximum_records=config.MAX_EVALUATION_RECORDS)
+    dataset_id = str(uuid4())
+    metadata = {
+        "dataset_id": dataset_id,
+        "filename": filename,
+        "record_count": len(records),
+        "size_bytes": len(content),
+        "uploaded_at": datetime.now(timezone.utc).isoformat(),
+        "validation_status": "valid",
+        "validation_error": None,
+        "dataset_sha256": sha256(content).hexdigest(),
+    }
+    root = config.EVALUATION_DATA_DIRECTORY
+    root.mkdir(parents=True, exist_ok=True)
+    with TemporaryDirectory(prefix=".upload-", dir=root) as temporary:
+        staging = Path(temporary) / dataset_id
+        staging.mkdir()
+        (staging / "dataset.jsonl").write_bytes(content)
+        (staging / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+        staging.rename(root / dataset_id)
+    return metadata
+
+
+def dataset_metadata(dataset_id: str) -> dict:
+    source = dataset_path(dataset_id)
+    if not source.is_file():
+        raise FileNotFoundError(f"evaluation dataset not found: {dataset_id}")
+    stat = source.stat()
+    metadata = {
+        "dataset_id": dataset_id,
+        "filename": source.name,
+        "uploaded_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+    }
+    sidecar = source.parent / "metadata.json"
+    if source.parent == config.EVALUATION_DATA_DIRECTORY / dataset_id and sidecar.is_file():
+        try:
+            metadata.update(json.loads(sidecar.read_text(encoding="utf-8")))
+        except (ValueError, TypeError):
+            # A damaged sidecar must not hide the file or break the library.
+            pass
+    metadata.update(
+        dataset_id=dataset_id, size_bytes=stat.st_size,
+        dataset_sha256=file_sha256(source), record_count=0,
+        validation_status="valid", validation_error=None,
+    )
+    try:
+        if stat.st_size > config.MAX_EVALUATION_DATASET_SIZE:
+            raise EvaluationDatasetError("file exceeds the configured upload limit")
+        metadata["record_count"] = len(parse_dataset_jsonl(
+            source.read_bytes(), maximum_records=config.MAX_EVALUATION_RECORDS,
+        ))
+    except EvaluationDatasetError as error:
+        metadata.update(validation_status="invalid", validation_error=str(error))
+    return metadata
+
+
+def list_datasets() -> list[dict]:
+    root = config.EVALUATION_DATA_DIRECTORY
+    if not root.is_dir():
+        return []
+    ids = {
+        path.stem for path in root.glob("*.jsonl")
+        if DATASET_NAME_PATTERN.fullmatch(path.stem) and not path.is_symlink()
+    }
+    ids.update(
+        path.name for path in root.iterdir()
+        if DATASET_NAME_PATTERN.fullmatch(path.name) and path.is_dir()
+        and not path.is_symlink() and (path / "dataset.jsonl").is_file()
+    )
+    return sorted((dataset_metadata(dataset_id) for dataset_id in ids),
+                  key=lambda item: item["uploaded_at"], reverse=True)
+
+
+def delete_dataset(dataset_id: str) -> None:
+    source = dataset_path(dataset_id)
+    source.unlink()
+    if source.parent == config.EVALUATION_DATA_DIRECTORY / dataset_id:
+        (source.parent / "metadata.json").unlink(missing_ok=True)
+        source.parent.rmdir()
 
 
 def read_dataset(

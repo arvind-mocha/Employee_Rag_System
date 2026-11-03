@@ -1,0 +1,3 @@
+{"id":"leave-1","question":"How many vacation days do employees receive?","reference_answer":"Employees receive 15 vacation days annually.","category":"direct_fact","expected_keywords":["15","vacation"],"required_facts":["15 days annually"],"reference_evidence":[{"content":"Employees receive 15 vacation days annually.","source_file":"handbook.md","section":"Vacation"}],"metadata":{"team":"people-operations"}}
+{"id":"leave-2","question":"How do I apply for leave?","reference_answer":"Submit a leave request to your manager.","category":"procedural"}
+{"id":"unknown-1","question":"What is the office access code?","reference_answer":"The documents do not provide an office access code.","answerable":false}

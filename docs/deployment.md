@@ -87,7 +87,6 @@ The backend package provides these entry points:
 | API | `uv run employee-rag-system` | FastAPI HTTP service |
 | Ingestion CLI | `uv run employee-rag-ingest` | Direct one-off ingestion |
 | Evaluation worker | `uv run employee-rag-worker` | RQ background jobs |
-| Dataset generator | `uv run employee-rag-generate-eval ...` | Direct JSONL generation |
 
 The Compose deployment already restarts failed API and worker containers and
 captures their logs. A production orchestrator should additionally define

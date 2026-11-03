@@ -20,6 +20,7 @@ RUN uv sync --frozen --no-dev --no-install-project
 
 # Install the application as an editable package for development.
 COPY app ./app
+COPY examples ./examples
 RUN uv sync --frozen --no-dev --editable \
     && mkdir -p \
         /app/data \

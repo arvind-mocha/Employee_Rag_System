@@ -6,7 +6,7 @@ from typing import Any, Literal
 from pydantic import BaseModel
 
 
-EvaluationJobType = Literal["dataset_generation", "evaluation_run"]
+EvaluationJobType = Literal["evaluation_run"]
 EvaluationJobState = Literal[
     "queued",
     "running",
@@ -35,3 +35,6 @@ class EvaluationJobStatus(BaseModel):
     ended_at: datetime | None = None
     result: dict[str, Any] | None = None
     error: str | None = None
+    completed_cases: int = 0
+    total_cases: int = 0
+    current_dataset_id: str | None = None
