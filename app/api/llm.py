@@ -3,6 +3,7 @@
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
+from functools import cached_property
 import asyncio
 import inspect
 import json
@@ -11,12 +12,14 @@ import math
 from time import sleep
 from typing import Any, Callable, Sequence
 
+from anthropic import AsyncAnthropic
 from langchain_core.messages import BaseMessage
 from langchain_core.tools import tool
 from langchain_anthropic import ChatAnthropic
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
+from openai import DefaultAsyncHttpxClient
 from pydantic import BaseModel
 
 from app.core.evaluation_context import EVALUATION_RUNTIME, CASE_TRACE
@@ -40,6 +43,14 @@ DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
 DEFAULT_GROK_BASE_URL = config.GROK_BASE_URL
 MAX_ANSWER_TOKENS = 512
 MODEL_TIMEOUT_SECONDS = 120
+
+
+class _OwnedAsyncChatAnthropic(ChatAnthropic):
+    """Keep evaluation cleanup from closing LangChain's shared HTTP pool."""
+
+    @cached_property
+    def _async_client(self) -> AsyncAnthropic:
+        return AsyncAnthropic(**self._client_params)
 
 
 class LLMProvider(StrEnum):
@@ -182,6 +193,7 @@ def create_chat_model_client(
     *,
     max_output_tokens: int = MAX_ANSWER_TOKENS,
     timeout_seconds: int = MODEL_TIMEOUT_SECONDS,
+    own_async_client: bool = False,
 ) -> ChatModelClient:
     """Create the LangChain chat model configured for one provider."""
     if max_output_tokens < 1:
@@ -190,6 +202,11 @@ def create_chat_model_client(
     settings = settings or _stored_llm_settings(provider)
     settings.validate_provider(provider)
     model_name = settings.model_for(provider)
+    async_options = (
+        {"http_async_client": DefaultAsyncHttpxClient(timeout=timeout_seconds)}
+        if own_async_client and provider in {LLMProvider.OPENAI, LLMProvider.GROK}
+        else {}
+    )
 
     if provider is LLMProvider.GEMINI:
         model: BaseChatModel = ChatGoogleGenerativeAI(
@@ -206,9 +223,11 @@ def create_chat_model_client(
             max_completion_tokens=max_output_tokens,
             timeout=timeout_seconds,
             max_retries=0,
+            **async_options,
         )
     elif provider is LLMProvider.ANTHROPIC:
-        model = ChatAnthropic(
+        anthropic_class = _OwnedAsyncChatAnthropic if own_async_client else ChatAnthropic
+        model = anthropic_class(
             model_name=model_name,
             api_key=settings.anthropic_api_key,
             max_tokens_to_sample=max_output_tokens,
@@ -224,6 +243,7 @@ def create_chat_model_client(
             timeout=timeout_seconds,
             max_retries=0,
             use_responses_api=False,
+            **async_options,
         )
 
     return ChatModelClient(provider, model_name, model)
@@ -234,12 +254,14 @@ def get_chat_model_client(
     *,
     max_output_tokens: int = MAX_ANSWER_TOKENS,
     timeout_seconds: int = MODEL_TIMEOUT_SECONDS,
+    own_async_client: bool = False,
 ) -> ChatModelClient:
     """Build a client from the active, unexpired database credential."""
     return create_chat_model_client(
         provider,
         max_output_tokens=max_output_tokens,
         timeout_seconds=timeout_seconds,
+        own_async_client=own_async_client,
     )
 
 
@@ -619,7 +641,8 @@ async def ainvoke_chat_model(
     # Each invocation owns its client; credential-store operations open and close
     # their own psycopg connections in the executor, never shared sessions.
     client = await asyncio.to_thread(
-        get_chat_model_client, provider, max_output_tokens=max_output_tokens, timeout_seconds=timeout_seconds,
+        get_chat_model_client, provider, max_output_tokens=max_output_tokens,
+        timeout_seconds=timeout_seconds, own_async_client=True,
     )
     try:
         return await _ainvoke_owned_client(
@@ -631,9 +654,9 @@ async def ainvoke_chat_model(
         # runs on cancellation, avoiding leaked connection pools across RQ runs.
         root = getattr(client.model, "root_async_client", None)
         if provider is LLMProvider.ANTHROPIC:
-            root = getattr(getattr(client.model, "_async_client", None), "_client", None)
+            root = getattr(client.model, "_async_client", None)
         elif provider is LLMProvider.GEMINI:
-            root = getattr(client.model, "async_client", None)
+            root = client.model
         close = getattr(root, "close", None)
         if not inspect.iscoroutinefunction(close):
             close = getattr(root, "aclose", None)

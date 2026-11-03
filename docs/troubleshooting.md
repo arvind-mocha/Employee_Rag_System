@@ -155,6 +155,15 @@ Check:
 
 The backend returns a safe provider error but does not return the stored key.
 
+If evaluations fail across multiple providers after a successful first call,
+check the traceback for an HTTP client that has already been closed. Evaluation
+requests must own their async transports; closing LangChain's cached transport
+breaks subsequent preflight and worker calls. Update the application and restart
+the API and worker to load the client-lifecycle fix.
+
+Provider keys come from the encrypted credential store. Changing `.env` does
+not replace a saved key; update it on **Settings** if authentication is rejected.
+
 ## Existing credentials cannot be decrypted
 
 The database was opened with a different installation encryption key. Restore
