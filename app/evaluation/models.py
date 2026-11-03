@@ -162,6 +162,12 @@ class EvaluationTiming(BaseModel):
 
 
 class EvaluationCaseResult(BaseModel):
+    case_id: str | None = None
+    dataset_order: int = 0
+    record_order: int = 0
+    provider_order: int = 0
+    retry_count: int = 0
+    retrieved_context: list[str] = Field(default_factory=list)
     run_id: str | None = None
     job_id: str | None = None
     error_category: str | None = None
@@ -235,8 +241,23 @@ class ProviderEvaluationSummary(BaseModel):
     )
 
 
+class EvaluationPerformance(BaseModel):
+    elapsed_seconds: float = 0.0
+    average_retrieval_ms: float | None = None
+    average_answer_generation_ms: float | None = None
+    average_judge_ms: float | None = None
+    average_case_ms: float | None = None
+    maximum_concurrent_cases: int = 0
+    retry_count: int = 0
+    successful_cases: int = 0
+    error_cases: int = 0
+    low_scoring_cases: int = 0
+
+
 class EvaluationRun(BaseModel):
-    status: Literal["completed", "partial", "failed"] = "completed"
+    concurrency: int = 1
+    performance: EvaluationPerformance = Field(default_factory=EvaluationPerformance)
+    status: Literal["completed", "partial", "failed", "canceled"] = "completed"
     error: str | None = None
     run_id: str
     dataset_id: str | None = None

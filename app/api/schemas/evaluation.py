@@ -5,6 +5,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.api import config
 from app.api.llm import LLMProvider
 from app.evaluation.dataset import validate_dataset_name
 from app.evaluation.models import (
@@ -83,6 +84,7 @@ class DeleteEvaluationDatasetResponse(BaseModel):
 
 
 class RunEvaluationRequest(EvaluationRetrievalRequest):
+    concurrency: int = Field(default_factory=lambda: config.EVALUATION_CONCURRENCY, ge=1, le=8, strict=True)
     dataset_ids: list[str] = Field(min_length=1, max_length=100)
     answer_providers: list[LLMProvider] = Field(min_length=1, max_length=4)
     judge_provider: LLMProvider

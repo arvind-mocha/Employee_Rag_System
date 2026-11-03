@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from fastapi.testclient import TestClient
 
@@ -43,6 +43,20 @@ class EvaluationApiTests(unittest.TestCase):
         self.config.start()
         self.addCleanup(self.config.stop)
         self.client = TestClient(app)
+        store_patch = patch("app.evaluation.jobs.EvaluationJobStore", autospec=True)
+        store_mock = store_patch.start()
+        store_mock.return_value.should_cancel.return_value = False
+        self.addCleanup(store_patch.stop)
+        from contextlib import asynccontextmanager
+        class TestGovernor:
+            @asynccontextmanager
+            async def slot(self, *args):
+                yield {"tokens": -1}
+            async def cooldown(self, *args):
+                pass
+        governor_patch = patch("app.evaluation.engine.RedisProviderGovernor", return_value=TestGovernor())
+        governor_patch.start()
+        self.addCleanup(governor_patch.stop)
         for target in ("app.api.controllers.evaluation.validate_runtime_preflight",
                        "app.api.controllers.evaluation_jobs.validate_runtime_preflight"):
             preflight = patch(target, return_value={})
@@ -121,11 +135,13 @@ class EvaluationApiTests(unittest.TestCase):
         answer_model.invoke.return_value = AIMessage(content=evidence + " [1]", usage_metadata={
             "input_tokens": 10, "output_tokens": 5, "total_tokens": 15,
         })
+        answer_model.ainvoke = AsyncMock(return_value=answer_model.invoke.return_value)
         judge_model.with_structured_output.return_value.invoke.return_value = {
             "raw": AIMessage(content="", usage_metadata={"input_tokens": 15, "output_tokens": 10, "total_tokens": 25}),
             "parsed": JudgeDraft(completeness=1, relevance=1, correctness=1, groundedness=1,
                                  rationale="Supported by the retrieved policy."), "parsing_error": None,
         }
+        judge_model.with_structured_output.return_value.ainvoke = AsyncMock(return_value=judge_model.with_structured_output.return_value.invoke.return_value)
         clients = {LLMProvider.OPENAI: ChatModelClient(LLMProvider.OPENAI, "answer-model", answer_model),
                    LLMProvider.ANTHROPIC: ChatModelClient(LLMProvider.ANTHROPIC, "judge-model", judge_model)}
         job = Mock(id="integration-job", meta={}, enqueued_at=None, started_at=None, ended_at=None)

@@ -83,3 +83,9 @@ MAX_EVALUATION_DATASET_SIZE = int(
 )
 MAX_EVALUATION_RECORDS = int(os.getenv("MAX_EVALUATION_RECORDS", 100))
 MAX_EVALUATION_UPLOAD_FILES = int(os.getenv("MAX_EVALUATION_UPLOAD_FILES", 5))
+
+# Evaluation execution and per-provider budgets (shared by API and RQ workers).
+EVALUATION_CONCURRENCY = int(os.getenv("EVALUATION_CONCURRENCY", "4"))
+if not 1 <= EVALUATION_CONCURRENCY <= 8:
+    raise ValueError("EVALUATION_CONCURRENCY must be between 1 and 8")
+EVALUATION_PROVIDER_LIMITS = os.getenv("EVALUATION_PROVIDER_LIMITS", "{}")

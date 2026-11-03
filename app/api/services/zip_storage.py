@@ -1,8 +1,10 @@
 """ZIP validation, extraction, and storage service."""
 
+from contextlib import ExitStack
 from dataclasses import dataclass
 from http import HTTPStatus
 from io import BytesIO
+import logging
 from pathlib import Path, PurePosixPath
 from shutil import copyfileobj
 from tempfile import TemporaryDirectory
@@ -10,6 +12,9 @@ from typing import Literal
 from zipfile import BadZipFile, ZipFile, ZipInfo, is_zipfile
 
 from app.api import config
+
+
+logger = logging.getLogger(__name__)
 
 
 FileCategory = Literal["structured", "unstructured"]
@@ -162,24 +167,35 @@ def _plan_files(archive: ZipFile) -> PlannedArchive:
 
 
 def _extract_files(archive: ZipFile, planned_files: list[PlannedFile]) -> None:
-    config.DATA_DIRECTORY.mkdir(parents=True, exist_ok=True)
-    config.STRUCTURED_DATA_DIRECTORY.mkdir(parents=True, exist_ok=True)
+    destination_directories = {
+        "structured": config.STRUCTURED_DATA_DIRECTORY,
+        "unstructured": config.DATA_DIRECTORY,
+    }
+    for directory in destination_directories.values():
+        directory.mkdir(parents=True, exist_ok=True)
 
-    with TemporaryDirectory(prefix=".data-upload-", dir=config.PROJECT_ROOT) as temp_dir:
-        staging_directory = Path(temp_dir)
+    with ExitStack() as stack:
+        # Each destination can be a separate Docker bind mount. Stage on that
+        # same filesystem so the final rename does not fail with EXDEV.
+        staging_directories = {
+            category: Path(
+                stack.enter_context(
+                    TemporaryDirectory(prefix=".data-upload-", dir=directory)
+                )
+            )
+            for category, directory in destination_directories.items()
+        }
 
-        for member, filename, _ in planned_files:
-            staged_file = staging_directory / filename
+        for member, filename, category in planned_files:
+            staged_file = staging_directories[category] / filename
             with archive.open(member) as source, staged_file.open("xb") as destination:
                 copyfileobj(source, destination)
 
         for _, filename, category in planned_files:
-            destination_directory = (
-                config.STRUCTURED_DATA_DIRECTORY
-                if category == "structured"
-                else config.DATA_DIRECTORY
+            destination_directory = destination_directories[category]
+            (staging_directories[category] / filename).replace(
+                destination_directory / filename
             )
-            (staging_directory / filename).replace(destination_directory / filename)
 
 
 def store_zip_archive(archive_bytes: bytes) -> StoredArchive:
@@ -214,6 +230,13 @@ def store_zip_archive(archive_bytes: bytes) -> StoredArchive:
         raise ZipStorageError(
             HTTPStatus.BAD_REQUEST,
             "The uploaded file is not a valid ZIP archive.",
+        ) from error
+    except PermissionError as error:
+        logger.exception("ZIP upload could not access source storage")
+        raise ZipStorageError(
+            HTTPStatus.SERVICE_UNAVAILABLE,
+            "Source storage is not accessible. Check permissions and Docker "
+            "bind mounts for data/ and structured_data/, then retry the upload.",
         ) from error
 
     return StoredArchive(

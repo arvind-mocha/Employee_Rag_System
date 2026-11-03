@@ -35,6 +35,20 @@ class EvaluationJobStatus(BaseModel):
     ended_at: datetime | None = None
     result: dict[str, Any] | None = None
     error: str | None = None
+    running_cases: int = 0
+    successful_cases: int = 0
+    failed_cases: int = 0
+    low_scoring_cases: int = 0
+    progress_percent: float = 0.0
+    elapsed_seconds: float = 0.0
+    maximum_concurrent_cases: int = 0
+    retry_count: int = 0
+    cancellation_requested: bool = False
     completed_cases: int = 0
     total_cases: int = 0
     current_dataset_id: str | None = None
+
+
+class EvaluationCancellationResponse(BaseModel):
+    job_id: str
+    status: Literal["requested", "canceled", "already_finished"]

@@ -1,3 +1,6 @@
+import { EvaluationProgress } from '../components/EvaluationProgress'
+import { ParallelEvaluationSettings } from '../components/ParallelEvaluationSettings'
+import { validEvaluationConcurrency } from '../lib/evaluationConcurrency'
 import { EvaluationErrorDetails } from '../components/EvaluationErrorDetails'
 import { evaluationCaseStatus, evaluationErrorLabel } from '../lib/evaluationStatus'
 import { FormEvent, useMemo, useState } from 'react'
@@ -276,13 +279,16 @@ function EvaluationDashboard({ run }: { run: EvaluationRun }) {
 
   return (
     <div className="evaluation-dashboard">
+      {run.performance && <p className="field-help">
+        Elapsed: {milliseconds(run.performance.elapsed_seconds * 1000)} · Maximum concurrent cases: {run.performance.maximum_concurrent_cases} · Retries: {run.performance.retry_count}
+      </p>}
       <div className="dashboard-title-row">
         <div>
           <span className="eyebrow">Latest evaluation run</span>
           <h2>Evaluation results</h2>
           <p>
             {run.dataset_name} · {run.results.length} model answers · judged by{' '}
-            {providerName(run.judge_provider)}
+            {providerName(run.judge_provider)} · {run.status === 'partial' ? 'Completed with evaluation errors' : run.status ?? 'completed'}
           </p>
         </div>
         <div className="run-meta">
@@ -639,6 +645,10 @@ export function EvaluationPage() {
     setCredentialValidationError(null)
     window.localStorage.setItem('employee-rag-judge-provider', provider)
   }
+  const [concurrency, setConcurrency] = useState(() => {
+    const saved = Number(window.localStorage.getItem('employee-rag-evaluation-concurrency') ?? 4)
+    return validEvaluationConcurrency(saved) ? saved : 4
+  })
   const [retrieval, setRetrieval] = useState<RetrievalOptions>(DEFAULT_RETRIEVAL)
   const [evaluationJob, setEvaluationJob] = useState<EvaluationJobAccepted | null>(
     () => readStoredJob(EVALUATION_JOB_STORAGE_KEY),
@@ -662,7 +672,11 @@ export function EvaluationPage() {
     },
   })
   const evaluationStatus = useEvaluationJob(evaluationJob)
-  const completedBatch = ['completed', 'failed'].includes(evaluationStatus.data?.status ?? '') && evaluationStatus.data?.result
+  const cancellationMutation = useMutation({
+    mutationFn: api.cancelEvaluation,
+    onSuccess: () => evaluationStatus.refetch(),
+  })
+  const completedBatch = ['completed', 'failed', 'stopped', 'canceled'].includes(evaluationStatus.data?.status ?? '') && evaluationStatus.data?.result
     ? evaluationStatus.data.result as unknown as EvaluationBatchRun : null
   const visibleRun = completedBatch
     ? resultScope === 'aggregate' ? completedBatch.aggregate
@@ -691,9 +705,13 @@ export function EvaluationPage() {
         setCredentialValidationError(error)
         return
       }
+      if (!validEvaluationConcurrency(concurrency)) {
+        setCredentialValidationError('Choose a valid parallel evaluation setting.')
+        return
+      }
       evaluationMutation.mutate({
         dataset_ids: selected, answer_providers: answerProviders,
-        judge_provider: judgeProvider, ...retrieval,
+        judge_provider: judgeProvider, concurrency, ...retrieval,
       })
     } finally {
       setCheckingBeforeRun(false)
@@ -744,6 +762,10 @@ export function EvaluationPage() {
               <span className="selection-count">{answerProviders.length} selected</span></div>
             <ProviderPicker selected={answerProviders} onChange={changeAnswerProviders}
               configurations={credentials.configurations} loading={credentials.isLoading} />
+            <ParallelEvaluationSettings value={concurrency} disabled={activeEvaluation || checkingBeforeRun} onChange={(value) => {
+              setConcurrency(value)
+              window.localStorage.setItem('employee-rag-evaluation-concurrency', String(value))
+            }} />
           </div>
         </section>
         <section className="config-primary">
@@ -789,11 +811,11 @@ export function EvaluationPage() {
       </div>}
       {evaluationStatus.data && evaluationStatus.data.status !== 'completed' && <>
         <JobProgress label="Selected dataset evaluation" status={evaluationStatus.data.status} error={evaluationStatus.data.error} />
-        {evaluationStatus.data.total_cases > 0 && <div className="dataset-upload-progress" role="status">
-          <progress value={evaluationStatus.data.completed_cases} max={evaluationStatus.data.total_cases} aria-label="Evaluation progress" />
-          <span>{evaluationStatus.data.completed_cases} / {evaluationStatus.data.total_cases} model answers processed</span>
-        </div>}
       </>}
+      {cancellationMutation.isError && <p className="error-banner" role="alert">{cancellationMutation.error.message}</p>}
+      {evaluationStatus.data && <EvaluationProgress job={evaluationStatus.data}
+        onCancel={() => evaluationJob && cancellationMutation.mutate(evaluationJob.job_id)} cancelPending={cancellationMutation.isPending} />}
+
       {completedBatch && visibleRun ? <>
         <div className="evaluation-result-scope">
           <label htmlFor="result-dataset">Results for</label>
@@ -802,7 +824,7 @@ export function EvaluationPage() {
             {completedBatch.datasets.map((run) => <option key={run.dataset_id} value={run.dataset_id ?? ''}>{run.dataset_name} · {run.dataset_id}</option>)}
           </select>
         </div>
-        <EvaluationDashboard key={visibleRun.run_id} run={visibleRun} />
+        <EvaluationDashboard key={`${visibleRun.run_id}:${visibleRun.dataset_id ?? "aggregate"}`} run={visibleRun} />
       </> : !activeEvaluation && <div className="evaluation-empty-state">
         <BarChart3 size={27} /><h2>Your results will appear here</h2>
         <p>Select datasets and run an evaluation to inspect scores, individual answers, cost, and latency.</p>

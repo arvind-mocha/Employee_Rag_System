@@ -1,5 +1,10 @@
 """On-demand RAG evaluation of user-provided reference datasets."""
 
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
+from threading import RLock
+
 from collections.abc import Callable, Iterable
 from datetime import datetime, timezone
 import json
@@ -7,10 +12,15 @@ import logging
 from statistics import fmean
 from time import perf_counter
 from typing import Any
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from pydantic import ValidationError
 
+from app.api import config
+from app.core.evaluation_context import (
+    CASE_TRACE, EVALUATION_RUNTIME, CaseTrace, EvaluationCancelled, EvaluationRuntime,
+)
+from app.evaluation.rate_limits import RedisProviderGovernor
 from app.api.answer_metrics import (
     citation_validity,
     lexical_similarity,
@@ -30,6 +40,7 @@ from app.evaluation.dataset import dataset_sha256, ground_truth_status, text_sha
 from app.evaluation.models import (
     AnswerScores,
     EvaluationCaseResult,
+    EvaluationPerformance,
     EvaluationRun,
     EvaluationTiming,
     GroundTruthRecord,
@@ -52,6 +63,15 @@ logger = logging.getLogger(__name__)
 
 PASS_THRESHOLD = 0.80
 JUDGE_GENERATION_MAX_OUTPUT_TOKENS = 4_096
+# PGVector sync wrappers and local torch model initialization/inference remain
+# serialized. Only independent provider I/O runs concurrently.
+_LOCAL_MODEL_LOCK = RLock()
+
+
+def _check_cancellation():
+    runtime = EVALUATION_RUNTIME.get()
+    if runtime is not None and runtime.cancelled.is_set():
+        raise EvaluationCancelled()
 
 
 class EvaluationOutputError(ValueError):
@@ -208,6 +228,7 @@ def _failed_case(
         answer_usage=answer_usage,
         judge_usage=judge_usage,
         usage=summarize_llm_usage([answer_usage, judge_usage]),
+        retrieved_context=[chunk.content for chunk in chunks],
         retrieved_chunk_ids=[
             chunk.chunk_id or text_sha256(chunk.content) for chunk in chunks
         ],
@@ -249,6 +270,7 @@ def evaluate_record(
     stage = "reference_validation"
     stage_started = started_at
     try:
+        _check_cancellation()
         status = ground_truth_status(record)
         if not record.relevant_evidence:
             warnings.append("Retrieval metrics unavailable: no reference evidence was supplied.")
@@ -256,18 +278,22 @@ def evaluate_record(
             warnings.append("The answer and judge use the same provider.")
         stage = "retrieval"
         stage_started = perf_counter()
-        query_router = router or get_query_router()
-        chunks = query_router.search(record.question, _retrieval_options(retrieval))
+        with _LOCAL_MODEL_LOCK:
+            _check_cancellation()
+            query_router = router or get_query_router()
+            chunks = query_router.search(record.question, _retrieval_options(retrieval))
         retrieval_ms = (perf_counter() - stage_started) * 1000
         stage = "metrics"
         stage_started = perf_counter()
         retrieval_scores = _retrieval_scores(record, chunks)
         stage = "answer_generation"
         stage_started = perf_counter()
+        _check_cancellation()
         generated_answer = generate_grounded_answer(record.question, chunks, answer_provider)
         answer_ms = (perf_counter() - stage_started) * 1000
         stage = "judge_invocation"
         stage_started = perf_counter()
+        _check_cancellation()
         judged = invoke_chat_model(
             build_judge_messages(record, generated_answer.answer, chunks), judge_provider,
             max_output_tokens=JUDGE_GENERATION_MAX_OUTPUT_TOKENS, response_schema=JudgeDraft,
@@ -278,7 +304,11 @@ def evaluate_record(
         overall = overall_answer_score(completeness=judge.completeness, relevance=judge.relevance)
         similarity = None
         try:
-            similarity = semantic_similarity(record.reference_answer, generated_answer.answer)
+            with _LOCAL_MODEL_LOCK:
+                _check_cancellation()
+                similarity = semantic_similarity(record.reference_answer, generated_answer.answer)
+        except EvaluationCancelled:
+            raise
         except Exception:
             warnings.append("Semantic similarity unavailable: the embedding model could not score this answer.")
         answer_scores = AnswerScores(
@@ -299,6 +329,7 @@ def evaluate_record(
             judge_provider=judged.provider, judge_model=judged.model_name,
             answer=generated_answer.answer, answer_usage=generated_answer.usage, judge_usage=judged.usage,
             usage=summarize_llm_usage([generated_answer.usage, judged.usage]),
+            retrieved_context=[chunk.content for chunk in chunks],
             retrieved_chunk_ids=[chunk.chunk_id or text_sha256(chunk.content) for chunk in chunks],
             retrieved_sources=list(dict.fromkeys(chunk.source_file for chunk in chunks if chunk.source_file)),
             retrieval_scores=retrieval_scores, answer_scores=answer_scores,
@@ -311,6 +342,8 @@ def evaluate_record(
         )
         result.model_dump(mode="json")
         return result
+    except EvaluationCancelled:
+        raise
     except Exception as error:
         elapsed = (perf_counter() - stage_started) * 1000
         if stage == "retrieval":
@@ -410,6 +443,21 @@ def _summary(
     )
 
 
+def performance_summary(results, elapsed_seconds, maximum_concurrent_cases):
+    return EvaluationPerformance(
+        elapsed_seconds=round(elapsed_seconds, 3),
+        average_retrieval_ms=_mean(r.timing.retrieval_ms for r in results),
+        average_answer_generation_ms=_mean(r.timing.answer_generation_ms for r in results),
+        average_judge_ms=_mean(r.timing.grading_ms for r in results),
+        average_case_ms=_mean(r.timing.total_ms for r in results),
+        maximum_concurrent_cases=maximum_concurrent_cases,
+        retry_count=sum(r.retry_count for r in results),
+        successful_cases=sum(r.error is None and r.answer_scores is not None for r in results),
+        error_cases=sum(r.error is not None for r in results),
+        low_scoring_cases=sum(r.passed is False for r in results),
+    )
+
+
 def run_evaluation(
     dataset_name: str,
     records: list[GroundTruthRecord],
@@ -420,45 +468,145 @@ def run_evaluation(
     router: QueryRouter | None = None,
     content_sha256: str | None = None,
     on_case_complete: Callable[[], None] | None = None,
+    concurrency: int | None = None,
+    on_case_result: Callable[[EvaluationCaseResult], None] | None = None,
+    on_progress: Callable[[dict], None] | None = None,
+    should_cancel: Callable[[], bool] | None = None,
+    governor=None,
+    run_id: str | None = None,
+    job_id: str | None = None,
+    dataset_order: int = 0,
 ) -> EvaluationRun:
-    """Run a dataset now; this function is never called automatically."""
-    run_id = str(uuid4())
-    query_router = router
+    """RQ/FastAPI sync entry point; all writes stay on one async coordinator."""
+    limit = config.EVALUATION_CONCURRENCY if concurrency is None else concurrency
+    if type(limit) is not int or not 1 <= limit <= 8:
+        raise ValueError("Evaluation concurrency must be an integer between 1 and 8")
+    return asyncio.run(_run_parallel(
+        dataset_name, records, answer_providers, judge_provider, retrieval,
+        router=router, content_sha256=content_sha256, on_case_complete=on_case_complete,
+        concurrency=limit, on_case_result=on_case_result, on_progress=on_progress,
+        should_cancel=should_cancel, governor=governor or RedisProviderGovernor(),
+        run_id=run_id or str(uuid4()), job_id=job_id, dataset_order=dataset_order,
+    ))
+
+
+async def _run_parallel(dataset_name, records, answer_providers, judge_provider, retrieval, *,
+                        router, content_sha256, on_case_complete, concurrency, on_case_result,
+                        on_progress, should_cancel, governor, run_id, job_id, dataset_order):
+    started = perf_counter()
+    runtime = EvaluationRuntime(governor)
+    runtime_token = EVALUATION_RUNTIME.set(runtime)
+    # Only concurrency worker tasks/futures exist, even for very large datasets.
+    work = iter((ri, pi, record, provider) for ri, record in enumerate(records)
+                for pi, provider in enumerate(answer_providers))
+    total = len(records) * len(answer_providers)
     results = []
-    for answer_provider in answer_providers:
-        for record in records:
-            started_at = perf_counter()
+    running = maximum = 0
+    executor = ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="rag-case")
+
+    def publish():
+        if on_progress:
+            on_progress(dict(
+                total_cases=total, completed_cases=len(results), running_cases=running,
+                successful_cases=sum(r.error is None for r in results),
+                failed_cases=sum(r.error is not None for r in results),
+                low_scoring_cases=sum(r.passed is False for r in results),
+                progress_percent=round(100 * len(results) / total, 1) if total else 0,
+                elapsed_seconds=round(perf_counter()-started, 3),
+                maximum_concurrent_cases=maximum,
+                retry_count=sum(r.retry_count for r in results),
+            ))
+
+    def execute(record, provider, trace):
+        token = CASE_TRACE.set(trace)
+        case_started = perf_counter()
+        try:
+            _check_cancellation()
             try:
-                result = evaluate_record(
-                    record, answer_provider, judge_provider, retrieval, router=query_router,
-                )
+                return evaluate_record(record, provider, judge_provider, retrieval, router=router)
+            except EvaluationCancelled:
+                raise
             except Exception as error:
-                # Last-resort isolation if even case error construction fails.
-                result = _failed_case(
-                    record, answer_provider, judge_provider, GroundTruthStatus.UNVERIFIABLE,
-                    started_at, error=error, stage="internal_evaluation",
-                )
-            results.append(result)
-            if on_case_complete is not None:
-                on_case_complete()
-    for result in results:
-        result.run_id = run_id
-        result.dataset_id = dataset_name
+                return _failed_case(record, provider, judge_provider, GroundTruthStatus.UNVERIFIABLE,
+                                    case_started, error=error, stage="internal_evaluation")
+        finally:
+            CASE_TRACE.reset(token)
+
+    async def consume():
+        nonlocal running, maximum
+        while not runtime.cancelled.is_set():
+            if should_cancel and should_cancel():
+                runtime.cancel()
+                break
+            item = next(work, None)
+            if item is None:
+                break
+            ri, pi, record, provider = item
+            running += 1
+            maximum = max(maximum, running)
+            publish()
+            trace = CaseTrace()
+            try:
+                context = copy_context()
+                result = await asyncio.get_running_loop().run_in_executor(executor, context.run, execute, record, provider, trace)
+                result = result.model_copy(deep=True)
+                result.case_id = str(uuid5(NAMESPACE_URL, f"{run_id}:{dataset_name}:{provider.value}:{record.id}"))
+                result.run_id, result.job_id, result.dataset_id = run_id, job_id, dataset_name
+                result.dataset_order, result.record_order, result.provider_order = dataset_order, ri, pi
+                result.retry_count = trace.retries
+                # Persist before counting completion; storage failures abort the
+                # coordinator instead of silently losing a supposedly saved case.
+                if on_case_result:
+                    on_case_result(result)
+                results.append(result)
+                if on_case_complete:
+                    on_case_complete()
+            except EvaluationCancelled:
+                runtime.cancel()
+            finally:
+                running -= 1
+                publish()
+
+    async def watch_cancellation():
+        while True:
+            await asyncio.sleep(.2)
+            try:
+                if should_cancel and await asyncio.to_thread(should_cancel):
+                    runtime.cancel()
+                    return
+            except Exception:
+                runtime.cancel()
+                raise
+
+    consumers = [asyncio.create_task(consume()) for _ in range(min(concurrency, total))]
+    watcher = asyncio.create_task(watch_cancellation()) if should_cancel else None
+    try:
+        publish()
+        await asyncio.gather(*consumers)
+        if watcher and watcher.done() and not watcher.cancelled():
+            watcher.result()
+    finally:
+        runtime.cancel()
+        if watcher:
+            watcher.cancel()
+        # Do not close the loop while case threads are waiting on native I/O.
+        for consumer in consumers:
+            if not consumer.done():
+                consumer.cancel()
+        await asyncio.gather(*consumers, *([watcher] if watcher else []), return_exceptions=True)
+        await asyncio.to_thread(executor.shutdown, wait=True, cancel_futures=True)
+        await asyncio.gather(*tuple(runtime.tasks), return_exceptions=True)
+        EVALUATION_RUNTIME.reset(runtime_token)
+    results.sort(key=lambda r: (r.record_order, r.provider_order))
+    canceled = len(results) < total
+    status = "canceled" if canceled else "failed" if all(r.error for r in results) else "partial" if any(r.error for r in results) else "completed"
     return EvaluationRun(
-        run_id=run_id,
-        status="failed" if all(result.error for result in results) else "partial" if any(result.error for result in results) else "completed",
-        error="No cases could be evaluated. Expand the case details for errors." if all(result.error for result in results) else None,
-        dataset_name=dataset_name,
+        run_id=run_id, dataset_id=dataset_name, dataset_name=dataset_name,
+        concurrency=concurrency, performance=performance_summary(results, perf_counter()-started, maximum),
+        status=status, error="Evaluation canceled; completed results are preserved." if canceled else
+        "No cases could be evaluated. Expand the case details for errors." if status == "failed" else None,
         dataset_sha256=content_sha256 or dataset_sha256(dataset_name),
-        generated_at=datetime.now(timezone.utc),
-        judge_provider=judge_provider,
-        usage=summarize_llm_usage(
-            usage
-            for result in results
-            for usage in (result.answer_usage, result.judge_usage)
-        ),
-        summaries=[
-            _summary(provider, results) for provider in answer_providers
-        ],
-        results=results,
+        generated_at=datetime.now(timezone.utc), judge_provider=judge_provider,
+        usage=summarize_llm_usage(u for r in results for u in (r.answer_usage, r.judge_usage)),
+        summaries=[_summary(provider, results) for provider in answer_providers], results=results,
     )

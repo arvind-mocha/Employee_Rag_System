@@ -10,6 +10,7 @@ from app.api.controllers.evaluation import (
 )
 from app.api.controllers.evaluation_jobs import (
     enqueue_evaluation_run,
+    cancel_evaluation_job,
 )
 from app.api.controllers.ingestion import start_ingestion
 from app.api.controllers.settings import save_provider_credential
@@ -21,11 +22,16 @@ from app.api.schemas.evaluation import (
     UploadEvaluationDatasetResponse,
 )
 from app.api.schemas.ingestion import IngestionStartResponse
-from app.api.schemas.jobs import EvaluationJobAccepted
+from app.api.schemas.jobs import EvaluationJobAccepted, EvaluationCancellationResponse
 from app.api.schemas.settings import ProviderCredentialResponse
 
 
 POST_ROUTES = (
+    ApiRoute(
+        name="cancel_evaluation_job", path="/evaluations/jobs/{job_id}/cancel",
+        endpoint=cancel_evaluation_job, response_model=EvaluationCancellationResponse,
+        status_code=HTTPStatus.ACCEPTED, tags=("evaluations",),
+    ),
     ApiRoute(
         name="save_provider_credential",
         path="/settings/providers",

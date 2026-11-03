@@ -1,3 +1,5 @@
+import errno
+import os
 import unittest
 from io import BytesIO
 from pathlib import Path
@@ -82,6 +84,70 @@ class DataUploadTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertFalse(self.data_directory.exists())
         self.ingestion_runner.mark_data_changed.assert_not_called()
+
+    def test_uploads_across_separate_data_mounts(self) -> None:
+        original_replace = os.replace
+
+        def device_for(path: Path) -> int:
+            for device, directory in enumerate(
+                (self.data_directory, self.structured_data_directory), start=1
+            ):
+                if path.is_relative_to(directory):
+                    return device
+            return 0
+
+        def replace_on_same_device(source, destination):
+            if device_for(Path(source)) != device_for(Path(destination)):
+                raise OSError(errno.EXDEV, "Invalid cross-device link")
+            return original_replace(source, destination)
+
+        with patch("os.replace", side_effect=replace_on_same_device):
+            response = self.client.post(
+                "/api/v1/data/upload",
+                files={
+                    "zip_file": (
+                        "source-data.zip",
+                        make_zip(
+                            {"handbook.md": b"# Handbook", "staff.csv": b"name\nAlex"}
+                        ),
+                        "application/zip",
+                    )
+                },
+            )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["total_files"], 2)
+        self.assertEqual(
+            (self.data_directory / "handbook.md").read_bytes(), b"# Handbook"
+        )
+        self.assertEqual(
+            (self.structured_data_directory / "staff.csv").read_bytes(), b"name\nAlex"
+        )
+        self.assertEqual(list(self.project_root.rglob(".data-upload-*")), [])
+
+    def test_storage_permission_failures_return_actionable_errors(self) -> None:
+        for operation in ("_stored_names", "_extract_files"):
+            with self.subTest(operation=operation), patch(
+                f"app.api.services.zip_storage.{operation}",
+                side_effect=PermissionError(1, "Operation not permitted", "/app/data"),
+            ):
+                response = self.client.post(
+                    "/api/v1/data/upload",
+                    files={
+                        "zip_file": (
+                            "source-data.zip",
+                            make_zip({"handbook.md": b"# Handbook"}),
+                            "application/zip",
+                        )
+                    },
+                )
+
+                self.assertEqual(response.status_code, 503)
+                detail = response.json()["detail"]
+                self.assertIn("Source storage is not accessible", detail)
+                self.assertIn("Docker bind mounts", detail)
+                self.assertNotIn("/app/data", detail)
+                self.ingestion_runner.mark_data_changed.assert_not_called()
 
     def test_rejects_an_archive_without_supported_files(self) -> None:
         response = self.client.post(

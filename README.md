@@ -45,6 +45,61 @@ Default limits are 50 MB per ZIP, 200 MB after extraction, and 1,000 files.
 Unsupported entries are ignored. Existing filenames are preserved and new
 duplicates receive a numeric suffix such as `handbook_1.pdf`.
 
+## Test data
+
+[Data.zip](Data.zip) contains the **TCS — Technology Consulting Sandbox** test
+corpus. It is entirely synthetic and is unrelated to the real Tata Consultancy
+Services. Its company, employee, customer, financial, and policy details are
+fictional; `.example` email addresses are not deliverable.
+
+The dataset snapshot is **November 2, 2026**. It covers 80 employees across eight
+departments and eight locations, eight fictional clients, reporting hierarchies,
+projects, policies, emails, and finance records. Historical material includes
+FY2024/FY2025 finance, January–September 2026 accounts, and an archived 2025
+handbook alongside the current 2026 version.
+
+The archive contains **141 document files** in PDF, DOCX, CSV, JSON, Markdown,
+TXT, and XLSX formats, organized under `Data/`:
+
+| Folder | Contents |
+| --- | --- |
+| `00_company/` | Company profile and FAQ |
+| `01_policies/` | HR, security, delivery, governance, procurement, and archived policies |
+| `02_employees/` | Employee directories, 80 profiles, department rosters, and management hierarchy |
+| `03_clients_services/` | Service catalog, client briefs, and project briefs |
+| `04_finance/` | Annual and quarterly reports, revenue breakdowns, tax, and spreadsheets |
+| `05_emails/` | 15 synthetic internal email messages |
+
+To try it, upload **Data.zip** from **Developer → Data**, select **Start
+ingestion**, and wait for **Knowledge base ready**. Use it to test fact lookup,
+reporting-chain questions, current-versus-archived policies, financial arithmetic,
+retrieval across document formats, and abstention when information is absent.
+See the [dataset guide](docs/DataSet.md) for coverage and canonical figures.
+
+### Evaluation questions are separate
+
+`Data.zip` contains document context only; it does **not** include evaluation
+JSONL, reference answers, or the full package's metadata directory. The dataset
+guide describes the separate full-package file
+`evaluation_do_not_ingest/krag_eval_questions_45.jsonl`, containing 45 questions.
+If using that package, ingest only `corpus/`; keep `evaluation_do_not_ingest/`
+and `metadata/` out of the knowledge base to prevent reference-answer leakage.
+
+Before uploading that JSONL through **Developer → Evaluation**, adapt its fields
+to Krag's [evaluation schema](docs/evaluation.md#jsonl-schema):
+
+- Keep `question`, and map `ground_truth` or `expected_answer` to the required
+  `reference_answer` field.
+- Use a supported `category`, or retain the original category in `metadata`.
+  Store `source_documents` and `difficulty` in `metadata` as well.
+- For unanswerable cases, set `answerable: false` and provide a reference
+  abstention. Source filenames alone do not supply reference evidence; retrieval
+  metrics remain unavailable unless evidence content is supplied.
+
+The [example JSONL](examples/evaluation_dataset.example.jsonl) demonstrates the
+schema for a different fictional company; use references matching this corpus
+when evaluating the TCS sandbox.
+
 ## Architecture
 
 ```mermaid
@@ -107,6 +162,7 @@ The default embedding model is
 | [Architecture](docs/architecture.md) | Components, storage, and ingestion, chat, and evaluation flows |
 | [API reference](docs/api.md) | Endpoint catalog, request examples, statuses, and limits |
 | [RAG evaluation](docs/evaluation.md) | Dataset creation, review workflow, metrics, pass rules, and jobs |
+| [Test dataset](docs/DataSet.md) | Synthetic TCS sandbox coverage, source folders, test cases, and canonical figures |
 | [Security](docs/security.md) | Credential encryption, data handling, trust boundaries, and hardening |
 | [Deployment](docs/deployment.md) | Full-stack Compose deployment, persistence, scaling, and operations |
 | [Troubleshooting](docs/troubleshooting.md) | Common startup, ingestion, provider, and evaluation problems |

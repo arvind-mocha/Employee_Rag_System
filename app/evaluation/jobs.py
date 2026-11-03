@@ -2,6 +2,7 @@
 
 import logging
 from typing import Any
+from uuid import uuid4
 
 from fastapi import HTTPException
 from rq import get_current_job
@@ -9,6 +10,7 @@ from app.core.safe_errors import log_safe_exception
 
 from app.api.controllers.evaluation import execute_selected_evaluation
 from app.api.schemas.evaluation import RunEvaluationRequest
+from app.evaluation.persistence import EvaluationJobStore
 
 
 logger = logging.getLogger(__name__)
@@ -18,6 +20,7 @@ def run_evaluation_job(payload: dict[str, Any]) -> dict[str, Any]:
     payload = dict(payload)
     expected_hashes = payload.pop("expected_hashes", None)
     job = get_current_job()
+    store = EvaluationJobStore(job) if job is not None else None
 
     def progress(completed: int, total: int, dataset_id: str) -> None:
         if job is not None:
@@ -27,8 +30,18 @@ def run_evaluation_job(payload: dict[str, Any]) -> dict[str, Any]:
 
     try:
         request = RunEvaluationRequest.model_validate(payload)
-        response = execute_selected_evaluation(request, expected_hashes=expected_hashes,
-                                               progress=progress, job_id=job.id if job is not None else None)
+        if job is not None:
+            job.meta["evaluation_request"] = request.model_dump(mode="json")
+            job.save_meta()
+        response = execute_selected_evaluation(
+            request, expected_hashes=expected_hashes, progress=progress,
+            job_id=job.id if job is not None else None,
+            on_case_result=store.persist if store else None,
+            on_progress=store.progress if store else None,
+            on_manifest=store.manifest if store else None,
+            should_cancel=store.should_cancel if store else None,
+            run_id=str(uuid4()),
+        )
         result = response.model_dump(mode="json")
     except HTTPException as error:
         logger.warning("Background evaluation rejected: %s", error.detail)
@@ -36,5 +49,5 @@ def run_evaluation_job(payload: dict[str, Any]) -> dict[str, Any]:
     except Exception as error:
         log_safe_exception(logger, error, "Background evaluation failed")
         return {"ok": False, "error": f"Background evaluation failed ({type(error).__name__})."}
-    return {"ok": response.aggregate.status != "failed", "error": response.aggregate.error,
+    return {"ok": response.aggregate.status not in {"failed", "canceled"}, "canceled": response.aggregate.status == "canceled", "error": response.aggregate.error,
             "result": result}

@@ -235,6 +235,12 @@ export type EvaluationCategory =
   | 'unanswerable'
 
 export interface EvaluationResult {
+  case_id?: string | null
+  dataset_order?: number
+  record_order?: number
+  provider_order?: number
+  retry_count?: number
+  retrieved_context?: string[]
   run_id?: string | null
   job_id?: string | null
   error_category?: string | null
@@ -289,7 +295,20 @@ export interface ProviderSummary {
 }
 
 export interface EvaluationRun {
-  status?: 'completed' | 'partial' | 'failed'
+  status?: 'completed' | 'partial' | 'failed' | 'canceled'
+  concurrency?: number
+  performance?: {
+    elapsed_seconds: number
+    maximum_concurrent_cases: number
+    retry_count: number
+    successful_cases: number
+    error_cases: number
+    low_scoring_cases: number
+    average_retrieval_ms: number | null
+    average_answer_generation_ms: number | null
+    average_judge_ms: number | null
+    average_case_ms: number | null
+  }
   error?: string | null
   run_id: string
   dataset_id: string | null
@@ -316,6 +335,15 @@ export interface EvaluationJobAccepted {
 }
 
 export interface EvaluationJobStatus {
+  running_cases?: number
+  successful_cases?: number
+  failed_cases?: number
+  low_scoring_cases?: number
+  progress_percent?: number
+  elapsed_seconds?: number
+  maximum_concurrent_cases?: number
+  retry_count?: number
+  cancellation_requested?: boolean
   job_id: string
   job_type: 'evaluation_run'
   status:

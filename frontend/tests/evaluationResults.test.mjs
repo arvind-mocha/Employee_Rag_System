@@ -43,3 +43,30 @@ test('successful and low-scoring cases do not render an error panel', () => {
     assert.equal(renderToStaticMarkup(React.createElement(EvaluationErrorDetails, { result: { error: null, passed } })), '')
   }
 })
+
+const { EvaluationProgress } = await load('../src/components/EvaluationProgress.tsx')
+const { validEvaluationConcurrency, EVALUATION_CONCURRENCY_OPTIONS } = await load('../src/lib/evaluationConcurrency.ts')
+
+test('parallel evaluation exposes the required choices and rejects invalid UI values', () => {
+  assert.deepEqual(EVALUATION_CONCURRENCY_OPTIONS.map((option) => option.value), [1, 2, 3, 4, 6, 8])
+  assert.ok(EVALUATION_CONCURRENCY_OPTIONS.find((option) => option.value === 4).label.includes('Default'))
+  for (const value of [1, 2, 3, 4, 6, 8]) assert.equal(validEvaluationConcurrency(value), true)
+  for (const value of [0, 5, 7, 9, 2.5, NaN, '4', null]) assert.equal(validEvaluationConcurrency(value), false)
+})
+test('live progress renders counters, elapsed time and cancellation without classifying low scores as errors', () => {
+  const markup = renderToStaticMarkup(React.createElement(EvaluationProgress, {
+    job: { status: 'running', total_cases: 36, completed_cases: 20, running_cases: 4,
+      successful_cases: 19, failed_cases: 1, low_scoring_cases: 3, elapsed_seconds: 123, retry_count: 2 },
+    onCancel: () => {}, cancelPending: false,
+  }))
+  for (const text of ['Total: 36', 'Completed: 20', 'Running: 4', 'Successful: 19', 'Failed (errors): 1',
+    '55.6%', '2m 3s', '3 scored cases', 'Retries: 2', 'Cancel evaluation']) assert.ok(markup.includes(text))
+})
+test('terminal progress disables cancellation and preserves incomplete progress after cancellation', () => {
+  const markup = renderToStaticMarkup(React.createElement(EvaluationProgress, {
+    job: { status: 'canceled', total_cases: 36, completed_cases: 4, running_cases: 0 },
+    onCancel: () => {}, cancelPending: false,
+  }))
+  assert.ok(markup.includes('11.1%'))
+  assert.ok(!markup.includes('Cancel evaluation'))
+})
