@@ -23,6 +23,64 @@ replace one another. Deleting one library entry removes only that dataset.
 Selection and the latest accepted job are retained in browser local storage.
 Jobs continue during navigation and page reloads; the browser resumes polling.
 
+## Provider configuration and preflight validation
+
+The **LLM Provider Configuration** section displays Google Gemini, OpenAI,
+Anthropic, and Grok (xAI), including their saved model and configuration status.
+It uses the existing `GET /api/v1/settings/providers` endpoint; no API keys are
+sent to the browser. Statuses are:
+
+| Label | Meaning |
+| --- | --- |
+| Configured (green) | A saved, non-expired key and nonblank model are present |
+| API Key Not Configured (red) | No usable saved key or model; the message identifies what to configure |
+| API Key Expired (amber) | The saved credential has expired |
+| Configuration Unavailable | The backend could not report status; evaluations remain blocked |
+
+Configured describes local saved state, not external provider verification.
+Use **Configure in Settings** to navigate explicitly. The page shows separate
+loading and retrieval-error states and offers retry on failure. It shares the
+Settings credential query cache, refreshes on returning to the page/window and
+every 15 seconds, and refreshes at the next known expiry. Background status
+failures override cached configured status. Dataset and provider selections are
+preserved when credentials become unavailable, including navigation to Settings.
+An unavailable answer provider already selected may be deselected, but cannot
+be newly selected. Unavailable judges cannot be newly selected.
+
+Immediately before submission, the frontend fetches credential status again.
+The synchronous and asynchronous endpoints validate all selected answer and judge
+providers, including saved model, expiry, and decryptability. The worker repeats
+the validation when execution starts. Invalid selections return an actionable,
+provider-specific error without queuing a job or making provider calls. Status
+lookup failures return `503`; missing/expired credentials or models return `422`.
+Keys never appear in job payloads or results. A provider may still reject a
+locally configured key during a real model call.
+
+Expired secrets are cleared when read and by the periodic cleanup task. Only
+provider/model/expiry metadata remains, enabling the amber expired status.
+Replacement updates the same saved provider; explicit deletion removes its
+metadata as well. Credentials deleted by older application versions cannot be
+retroactively distinguished from credentials that were never saved.
+
+## Example JSONL Template
+
+The **JSONL Developer Reference** section provides **View Example**,
+**Download Example JSONL**, **Copy JSONL**, and **View schema documentation**.
+The formatted preview and raw copyable source use the same backend download
+endpoint and tracked file:
+`examples/evaluation_dataset.example.jsonl`.
+It contains five fictional Cedar Lane Labs cases: direct fact, procedure,
+multiple facts (`spanning`), numerical reasoning, and an unanswerable question.
+It demonstrates expected keywords, facts, evidence content, and optional metadata
+without document IDs, chunk IDs, fingerprints, or model provenance. The numerical
+case omits evidence deliberately to demonstrate unavailable retrieval metrics.
+Replace fictional policies with your own reviewed references for meaningful scores.
+
+`GET /api/v1/evaluations/reference/example` returns that file verbatim as a UTF-8
+attachment. `GET /api/v1/evaluations/reference/schema` returns the actual record
+JSON Schema, supported categories, and configured file/record/upload limits.
+The existing upload schema and evaluation scoring rules are unchanged.
+
 ## JSONL schema
 
 Use UTF-8 (an optional UTF-8 BOM is accepted), with one JSON object per nonempty
@@ -34,7 +92,7 @@ line. Blank lines are ignored. Every record requires two nonblank strings:
 ```
 
 These sample facts are illustrative; supply references that match your corpus.
-A fuller example is available at [examples/evaluation.jsonl](../examples/evaluation.jsonl).
+A fuller example is available at [examples/evaluation_dataset.example.jsonl](../examples/evaluation_dataset.example.jsonl).
 
 | Field | Requirement / default |
 | --- | --- |

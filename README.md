@@ -239,17 +239,21 @@ longer while the embedding model downloads.
 3. Upload one or multiple user-authored `.jsonl` files using drag-and-drop or
    **Upload datasets**. Each file is validated and stored independently.
 4. Preview datasets, then use checkboxes to select the files to evaluate.
-5. Select answer providers, a judge provider, and retrieval settings.
-6. Click **Run Evaluation**, follow progress, and inspect individual file results
+5. Use **JSONL Developer Reference → View Example** or **Download Example JSONL**
+   for a five-record fictional template and the current schema/limits.
+6. Review **LLM Provider Configuration**. Configure missing or expired keys/models
+   in Settings; only configured providers can be newly selected as answers or judge.
+7. Select answer providers, a judge provider, and retrieval settings.
+8. Click **Run Evaluation**, follow progress, and inspect individual file results
    or the aggregated dashboard. Background jobs continue during page navigation.
-7. Upload additional files or change the selection for later runs; individual
+9. Upload additional files or change the selection for later runs; individual
    datasets can be deleted from the library.
 
 Every record requires a nonblank `question` and `reference_answer`. Optional
 fields include `id`, `answerable`, `category`, `expected_keywords`,
 `required_facts`, `reference_evidence`, and `metadata`. Unanswerable cases use
 `answerable:false` with a reference abstention. Start with
-[examples/evaluation.jsonl](examples/evaluation.jsonl) and read the
+[examples/evaluation_dataset.example.jsonl](examples/evaluation_dataset.example.jsonl) and read the
 [full schema](docs/evaluation.md#jsonl-schema).
 
 Evaluation includes retrieval metrics when reference evidence is provided,
@@ -265,7 +269,8 @@ evaluation questions or reference answers automatically.
 
 - Provider keys are encrypted before PostgreSQL storage and are never returned
   to the browser.
-- Expired keys are blocked and automatically deleted.
+- Expired keys are blocked and their ciphertext, nonce, and hint are cleared.
+  Model/expiry metadata remains so Evaluation can identify expired providers.
 - The local encryption key is stored in
   `.secrets/credential_encryption_key` and must be backed up securely.
 - A container deployment can mount the key at
@@ -283,6 +288,7 @@ rate limiting, monitoring, and backups.
 uv run pytest -q
 
 cd frontend
+npm run test
 npm run lint
 npm run build
 ```

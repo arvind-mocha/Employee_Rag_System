@@ -7,14 +7,16 @@ import logging
 from typing import Annotated
 from uuid import uuid4
 
-from fastapi import File, HTTPException, Query, UploadFile, status
+from fastapi import File, HTTPException, Query, Response, UploadFile, status
 
 from app.api import config
 from app.api.llm_usage import summarize_llm_usage
+from app.api.services.provider_configuration import validate_evaluation_providers
 from app.api.schemas.evaluation import (
     DeleteEvaluationDatasetResponse,
     EvaluationDatasetList,
     EvaluationDatasetPreview,
+    EvaluationSchemaReference,
     RunEvaluationRequest,
     RunEvaluationResponse,
     UploadEvaluationDatasetResponse,
@@ -30,7 +32,7 @@ from app.evaluation.dataset import (
     validate_upload_filename,
 )
 from app.evaluation.engine import _summary, run_evaluation
-from app.evaluation.models import EvaluationRun
+from app.evaluation.models import EvaluationCategory, EvaluationRun, GroundTruthRecord
 
 
 logger = logging.getLogger(__name__)
@@ -44,6 +46,29 @@ def _dataset_request_error(error: Exception) -> HTTPException:
 
 def list_evaluation_datasets() -> EvaluationDatasetList:
     return EvaluationDatasetList(datasets=list_datasets())
+
+
+def get_evaluation_example() -> Response:
+    """Serve the tracked reference verbatim for both preview and download."""
+    source = config.PROJECT_ROOT / "examples" / "evaluation_dataset.example.jsonl"
+    return Response(
+        content=source.read_bytes(),
+        media_type="application/x-ndjson",
+        headers={
+            "Content-Disposition": 'attachment; filename="evaluation_dataset.example.jsonl"',
+            "Cache-Control": "no-cache",
+        },
+    )
+
+
+def get_evaluation_schema() -> EvaluationSchemaReference:
+    return EvaluationSchemaReference(
+        maximum_file_size_bytes=config.MAX_EVALUATION_DATASET_SIZE,
+        maximum_records=config.MAX_EVALUATION_RECORDS,
+        maximum_upload_files=config.MAX_EVALUATION_UPLOAD_FILES,
+        categories=[category.value for category in EvaluationCategory],
+        record_schema=GroundTruthRecord.model_json_schema(),
+    )
 
 
 def preview_evaluation_dataset(
@@ -146,6 +171,7 @@ def execute_selected_evaluation(
     progress: Callable[[int, int, str], None] | None = None,
 ) -> RunEvaluationResponse:
     selected = load_selected_datasets(request, expected_hashes)
+    validate_evaluation_providers(request.answer_providers, request.judge_provider)
     total = sum(len(records) for _, records in selected) * len(request.answer_providers)
     completed = 0
     runs = []

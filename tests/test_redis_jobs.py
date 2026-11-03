@@ -13,6 +13,9 @@ from app.core.redis_client import RedisSettings
 class RedisEvaluationJobApiTests(unittest.TestCase):
     def setUp(self) -> None:
         self.client = TestClient(app)
+        validation = patch("app.api.controllers.evaluation_jobs.validate_evaluation_providers")
+        validation.start()
+        self.addCleanup(validation.stop)
 
     @patch("app.api.controllers.evaluation_jobs.load_selected_datasets", return_value=[])
     @patch("app.api.controllers.evaluation_jobs.get_evaluation_queue")

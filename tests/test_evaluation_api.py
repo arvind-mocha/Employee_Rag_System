@@ -1,6 +1,7 @@
 """Dataset library, explicit selections, and asynchronous reporting contracts."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from dataclasses import replace
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -10,17 +11,19 @@ from unittest.mock import Mock, patch
 from fastapi.testclient import TestClient
 
 from app.api.main import app
-from app.api.llm import LLMProvider
+from app.api.llm import GeneratedAnswer, GeneratedText, LLMProvider
 from app.api.llm_usage import LLMUsage, summarize_llm_usage
 from app.api.schemas.evaluation import RunEvaluationRequest
 from app.core.redis_client import RedisSettings
-from app.evaluation.dataset import dataset_path
+from app.core.credential_store import ActiveCredential, CredentialStoreUnavailable, StoredCredential
+from app.evaluation.dataset import dataset_path, parse_dataset_jsonl
 from app.evaluation.engine import _summary
 from app.evaluation.jobs import run_evaluation_job
 from app.evaluation.models import (
     AnswerScores, EvaluationCaseResult, EvaluationRun, EvaluationTiming,
     GroundTruthStatus, ReviewStatus,
 )
+from app.retrieval.models import RetrievedChunk
 
 
 BASE = "/api/v1/evaluations"
@@ -40,6 +43,20 @@ class EvaluationApiTests(unittest.TestCase):
         self.config.start()
         self.addCleanup(self.config.stop)
         self.client = TestClient(app)
+        self.credential_store = Mock()
+        now = datetime.now(timezone.utc)
+        self.credential_store.list_active.return_value = [
+            StoredCredential(provider.value, "test-model", "1234",
+                             now + timedelta(hours=1), now, now)
+            for provider in LLMProvider
+        ]
+        self.credential_store.get_active.side_effect = lambda provider: ActiveCredential(
+            provider, "test-model", "private-test-key", now + timedelta(hours=1),
+        )
+        store_patch = patch("app.api.services.provider_configuration.get_credential_store",
+                            return_value=self.credential_store)
+        store_patch.start()
+        self.addCleanup(store_patch.stop)
 
     def upload(self, *files):
         return self.client.post(f"{BASE}/datasets/upload", files=[
@@ -300,6 +317,130 @@ class EvaluationApiTests(unittest.TestCase):
         self.assertEqual(self.client.get(f"{BASE}/datasets/escape").status_code, 422)
         self.assertEqual(self.client.delete(f"{BASE}/datasets/escape").status_code, 422)
         self.assertTrue(outside.exists())
+
+    @patch("app.api.controllers.evaluation.run_evaluation")
+    @patch("app.api.controllers.evaluation_jobs.get_evaluation_queue")
+    def test_backend_blocks_unconfigured_answers_and_judges(self, queue, run):
+        item = self.dataset()
+        configured = self.credential_store.list_active.return_value
+        for missing in ["openai", "anthropic"]:
+            self.credential_store.list_active.return_value = [
+                credential for credential in configured if credential.provider != missing
+            ]
+            for endpoint in ["run", "run/async"]:
+                with self.subTest(provider=missing, endpoint=endpoint):
+                    response = self.client.post(f"{BASE}/{endpoint}", json=self.request_run([item["dataset_id"]]))
+                    self.assertEqual(response.status_code, 422)
+                    self.assertIn("OpenAI" if missing == "openai" else "Anthropic", response.json()["detail"])
+                    self.assertIn("Settings", response.json()["detail"])
+        queue.assert_not_called()
+        run.assert_not_called()
+
+    @patch("app.api.controllers.evaluation.run_evaluation")
+    def test_missing_model_and_credential_status_failure_block_runs(self, run):
+        item = self.dataset()
+        self.credential_store.list_active.return_value = [
+            replace(credential, model_name=" ") if credential.provider == "openai" else credential
+            for credential in self.credential_store.list_active.return_value
+        ]
+        response = self.client.post(f"{BASE}/run", json=self.request_run([item["dataset_id"]]))
+        self.assertEqual(response.status_code, 422)
+        self.assertIn("Model not configured", response.json()["detail"])
+        self.credential_store.list_active.side_effect = CredentialStoreUnavailable("secret-error-value")
+        response = self.client.post(f"{BASE}/run", json=self.request_run([item["dataset_id"]]))
+        self.assertEqual(response.status_code, 503)
+        self.assertNotIn("secret-error-value", response.text)
+        run.assert_not_called()
+
+    @patch("app.api.controllers.evaluation_jobs.get_redis_settings", return_value=RedisSettings())
+    @patch("app.api.controllers.evaluation_jobs.get_evaluation_queue")
+    @patch("app.api.controllers.evaluation.run_evaluation", side_effect=fake_run)
+    def test_worker_rechecks_expiry_deletion_and_replacement_after_queueing(self, run, queue, _settings):
+        item = self.dataset()
+        queue.return_value.enqueue_call.return_value = Mock(id="credential-job")
+        response = self.client.post(f"{BASE}/run/async", json=self.request_run([item["dataset_id"]]))
+        self.assertEqual(response.status_code, 202)
+        payload = queue.return_value.enqueue_call.call_args.kwargs["args"][0]
+        configured = self.credential_store.list_active.return_value
+        self.assertNotIn("private-test-key", json.dumps(payload))
+        for provider in ["openai", "anthropic"]:
+            expired = [replace(credential, expires_at=datetime.now(timezone.utc) - timedelta(seconds=1))
+                       if credential.provider == provider else credential for credential in configured]
+            deleted = [credential for credential in configured if credential.provider != provider]
+            for state, expected in [(expired, "expired"), (deleted, "not configured")]:
+                self.credential_store.list_active.return_value = state
+                with patch("app.evaluation.jobs.get_current_job", return_value=None):
+                    result = run_evaluation_job(payload)
+                self.assertFalse(result["ok"])
+                self.assertIn(expected, result["error"])
+                run.assert_not_called()
+        self.credential_store.list_active.return_value = configured
+        with patch("app.evaluation.jobs.get_current_job", return_value=None):
+            result = run_evaluation_job(payload)
+        self.assertTrue(result["ok"])
+        self.assertNotIn("private-test-key", json.dumps(result))
+        run.assert_called_once()
+
+    def test_example_download_matches_tracked_file_and_upload_schema(self):
+        source = Path(__file__).parents[1] / "examples" / "evaluation_dataset.example.jsonl"
+        response = self.client.get(f"{BASE}/reference/example")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, source.read_bytes())
+        self.assertIn('filename="evaluation_dataset.example.jsonl"', response.headers["content-disposition"])
+        self.assertIn("application/x-ndjson", response.headers["content-type"])
+        lines = response.content.decode("utf-8").splitlines()
+        self.assertEqual(len(lines), 5)
+        for line in lines:
+            self.assertIsInstance(json.loads(line), dict)
+        records = parse_dataset_jsonl(response.content)
+        self.assertEqual({record.category.value for record in records},
+                         {"direct_fact", "procedural", "spanning", "numerical", "unanswerable"})
+        self.assertTrue(all(record.reference_provider is None for record in records))
+        uploaded = self.upload((source.name, response.content))
+        self.assertEqual(uploaded.status_code, 201)
+        self.assertEqual(uploaded.json()["datasets"][0]["record_count"], 5)
+
+    def test_schema_reference_uses_current_validation_limits(self):
+        with patch("app.api.config.MAX_EVALUATION_RECORDS", 321):
+            response = self.client.get(f"{BASE}/reference/schema")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["maximum_records"], 321)
+        self.assertEqual(set(response.json()["record_schema"]["required"]), {"question", "reference_answer"})
+        self.assertIn("unanswerable", response.json()["categories"])
+
+    @patch("app.evaluation.engine.get_query_router")
+    @patch("app.evaluation.engine.semantic_similarity", return_value=0.9)
+    @patch("app.evaluation.engine.invoke_chat_model")
+    @patch("app.evaluation.engine.generate_grounded_answer")
+    def test_uploaded_example_runs_through_existing_evaluation_engine(self, generate, judge, _similarity, get_router):
+        example = self.client.get(f"{BASE}/reference/example").content
+        records = parse_dataset_jsonl(example)
+        by_question = {record.question: record for record in records}
+        router = get_router.return_value
+        router.search.side_effect = lambda question, _options: [
+            RetrievedChunk(content=evidence.content, relevance_score=1.0,
+                           chunk_id=None, source_file=None, source_type=None,
+                           section=evidence.section, chunk_index=None)
+            for evidence in by_question[question].relevant_evidence
+        ]
+        generate.side_effect = lambda question, _chunks, provider: GeneratedAnswer(
+            by_question[question].reference_answer, provider, "answer-model", None,
+        )
+        judge.return_value = GeneratedText(json.dumps({
+            "completeness": 1, "relevance": 1, "correctness": 1,
+            "groundedness": 1, "rationale": "Reference agreement",
+        }), LLMProvider.ANTHROPIC, "judge-model", None)
+        item = self.upload(("example.jsonl", example)).json()["datasets"][0]
+        response = self.client.post(f"{BASE}/run", json=self.request_run([item["dataset_id"]]))
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(body["aggregate"]["summaries"][0]["passed"], 5)
+        self.assertEqual(generate.call_count, 5)
+        self.assertEqual(judge.call_count, 5)
+        results = {result["record_id"]: result for result in body["datasets"][0]["results"]}
+        self.assertEqual(results["fictional-leave"]["retrieval_scores"]["recall_at_k"], 1)
+        self.assertIsNone(results["fictional-learning-budget"]["retrieval_scores"])
+        self.assertIsNone(results["fictional-unknown-access-code"]["retrieval_scores"])
 
 
 if __name__ == "__main__":

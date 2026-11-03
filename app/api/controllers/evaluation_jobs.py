@@ -8,6 +8,7 @@ from rq.exceptions import NoSuchJobError
 from rq.job import Job
 
 from app.api.controllers.evaluation import load_selected_datasets
+from app.api.services.provider_configuration import validate_evaluation_providers
 from app.api.schemas.evaluation import RunEvaluationRequest
 from app.api.schemas.jobs import (
     EvaluationJobAccepted,
@@ -64,6 +65,7 @@ def enqueue_evaluation_run(
     request: RunEvaluationRequest,
 ) -> EvaluationJobAccepted:
     selected = load_selected_datasets(request)
+    validate_evaluation_providers(request.answer_providers, request.judge_provider)
     payload = request.model_dump(mode="json")
     payload["expected_hashes"] = {
         meta["dataset_id"]: meta["dataset_sha256"] for meta, _ in selected

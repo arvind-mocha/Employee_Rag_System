@@ -16,13 +16,19 @@ backend. The backend:
    PostgreSQL.
 6. Returns only masked metadata to the browser.
 
-The API decrypts a key only when building a provider client for a request. Keys
+The API decrypts a key when building a provider client or checking selected
+evaluation providers before execution. Keys
 are not cached in Redis, returned in API responses, or intentionally written to
 logs.
 
 Expired credentials are rejected before use. A background cleanup task checks
-for expired records every 60 seconds, and users can delete a key immediately
-from Settings.
+for expired records every 60 seconds. Cleanup clears expired ciphertext, nonce,
+and key hint while retaining provider/model/expiry metadata for configuration
+status. Reads also clear expired secrets. Active-key lookup excludes expired
+rows. Users can delete a credential and its metadata immediately from Settings.
+The configuration status response contains no secret material, and Configured
+is not a claim of provider-side verification. Evaluation preflight checks run
+before queuing and again in the worker, using safe provider-specific errors.
 
 ## Encryption key
 

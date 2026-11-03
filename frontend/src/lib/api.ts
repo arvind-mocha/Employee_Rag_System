@@ -8,6 +8,7 @@ import type {
   EvaluationDatasetPreview,
   EvaluationJobAccepted,
   EvaluationJobStatus,
+  EvaluationSchemaReference,
   IngestionStartResponse,
   IngestionStatusResponse,
   Provider,
@@ -111,6 +112,15 @@ export const api = {
 
   listDatasets: () =>
     request<{ datasets: EvaluationDataset[] }>('/evaluations/datasets'),
+
+  getEvaluationSchema: () =>
+    request<EvaluationSchemaReference>('/evaluations/reference/schema'),
+
+  getEvaluationExample: async () => {
+    const response = await fetch(`${API_ROOT}/evaluations/reference/example`)
+    if (!response.ok) throw new ApiError('Example JSONL could not be loaded. Please retry.', response.status)
+    return response.text()
+  },
 
   previewDataset: (datasetId: string, offset = 0) =>
     request<EvaluationDatasetPreview>(

@@ -3,7 +3,6 @@ import { useMutation, useQuery } from '@tanstack/react-query'
 import {
   AlertTriangle,
   BarChart3,
-  Check,
   CheckCircle2,
   ChevronRight,
   ChevronDown,
@@ -29,6 +28,11 @@ import {
   XAxis,
   YAxis,
 } from 'recharts'
+import { Link } from 'react-router-dom'
+import { EvaluationProviderStatus, ProviderPicker } from '../components/EvaluationProviders'
+import { EvaluationReference } from '../components/EvaluationReference'
+import { useProviderConfiguration } from '../hooks/useProviderConfiguration'
+import { evaluationConfigurationError, providerConfiguration, PROVIDER_STATUS_LABELS } from '../lib/providerConfiguration'
 import { EvaluationDatasets } from '../components/EvaluationDatasets'
 import { StrategyControls } from '../components/StrategyControls'
 import { api } from '../lib/api'
@@ -130,46 +134,6 @@ function useEvaluationJob(job: EvaluationJobAccepted | null) {
       return status && TERMINAL_JOB_STATES.has(status) ? false : 1500
     },
   })
-}
-
-function ProviderPicker({
-  selected,
-  onChange,
-}: {
-  selected: Provider[]
-  onChange: (providers: Provider[]) => void
-}) {
-  const toggle = (provider: Provider) => {
-    if (selected.includes(provider)) {
-      if (selected.length === 1) return
-      onChange(selected.filter((item) => item !== provider))
-    } else {
-      onChange([...selected, provider])
-    }
-  }
-
-  return (
-    <div className="provider-check-grid">
-      {PROVIDERS.map((provider) => {
-        const active = selected.includes(provider.id)
-        return (
-          <button
-            type="button"
-            key={provider.id}
-            className={active ? 'selected' : ''}
-            onClick={() => toggle(provider.id)}
-            aria-pressed={active}
-          >
-            <i style={{ background: PROVIDER_COLORS[provider.id] }}>
-              {provider.shortName}
-            </i>
-            <span>{provider.name}</span>
-            <b>{active && <Check size={13} />}</b>
-          </button>
-        )
-      })}
-    </div>
-  )
 }
 
 function JobProgress({
@@ -648,8 +612,29 @@ function EvaluationDashboard({ run }: { run: EvaluationRun }) {
 
 export function EvaluationPage() {
   const [selection, setSelection] = useState(readStoredSelection)
-  const [answerProviders, setAnswerProviders] = useState<Provider[]>(['gemini', 'openai'])
-  const [judgeProvider, setJudgeProvider] = useState<Provider>('openai')
+  const [answerProviders, setAnswerProviders] = useState<Provider[]>(() => {
+    try {
+      const saved = JSON.parse(window.localStorage.getItem('employee-rag-answer-providers') ?? '[]')
+      return Array.isArray(saved) ? saved.filter((id): id is Provider => PROVIDERS.some((provider) => provider.id === id)) : []
+    } catch { return [] }
+  })
+  const [judgeProvider, setJudgeProvider] = useState<Provider | ''>(() => {
+    const saved = window.localStorage.getItem('employee-rag-judge-provider')
+    return PROVIDERS.some((provider) => provider.id === saved) ? saved as Provider : ''
+  })
+  const credentials = useProviderConfiguration()
+  const [credentialValidationError, setCredentialValidationError] = useState<string | null>(null)
+  const [checkingBeforeRun, setCheckingBeforeRun] = useState(false)
+  const changeAnswerProviders = (providers: Provider[]) => {
+    setAnswerProviders(providers)
+    setCredentialValidationError(null)
+    window.localStorage.setItem('employee-rag-answer-providers', JSON.stringify(providers))
+  }
+  const changeJudgeProvider = (provider: Provider | '') => {
+    setJudgeProvider(provider)
+    setCredentialValidationError(null)
+    window.localStorage.setItem('employee-rag-judge-provider', provider)
+  }
   const [retrieval, setRetrieval] = useState<RetrievalOptions>(DEFAULT_RETRIEVAL)
   const [evaluationJob, setEvaluationJob] = useState<EvaluationJobAccepted | null>(
     () => readStoredJob(EVALUATION_JOB_STORAGE_KEY),
@@ -682,13 +667,33 @@ export function EvaluationPage() {
   const activeEvaluation = evaluationMutation.isPending || Boolean(evaluationJob && (
     !evaluationStatus.data || !TERMINAL_JOB_STATES.has(evaluationStatus.data.status)
   ) && !evaluationStatus.isError)
-  const runEvaluation = (event: FormEvent) => {
+  const configurationError = evaluationConfigurationError(
+    selected, answerProviders, judgeProvider, credentials.configurations,
+  )
+  const runEvaluation = async (event: FormEvent) => {
     event.preventDefault()
-    if (!selected.length || !answerProviders.length || activeEvaluation) return
-    evaluationMutation.mutate({
-      dataset_ids: selected, answer_providers: answerProviders,
-      judge_provider: judgeProvider, ...retrieval,
-    })
+    if (activeEvaluation || checkingBeforeRun) return
+    setCheckingBeforeRun(true)
+    setCredentialValidationError(null)
+    try {
+      // Always re-read credentials immediately before submission. Keep all
+      // selections intact when a key expires or the status request fails.
+      const latest = await credentials.refetch()
+      const configurations = PROVIDERS.map((provider) => providerConfiguration(
+        provider.id, latest.data?.providers ?? [], latest.isError,
+      ))
+      const error = evaluationConfigurationError(selected, answerProviders, judgeProvider, configurations)
+      if (error || !judgeProvider) {
+        setCredentialValidationError(error)
+        return
+      }
+      evaluationMutation.mutate({
+        dataset_ids: selected, answer_providers: answerProviders,
+        judge_provider: judgeProvider, ...retrieval,
+      })
+    } finally {
+      setCheckingBeforeRun(false)
+    }
   }
 
   return (
@@ -707,7 +712,7 @@ export function EvaluationPage() {
         <section className="config-primary">
           <div className="section-number">01</div>
           <div className="config-content">
-            <div className="config-heading"><div><span>Evaluation data</span><h2>Dataset library</h2></div></div>
+            <div className="config-heading"><div><span>Evaluation Datasets</span><h2>Dataset library</h2></div></div>
             {library.isLoading && <p role="status">Loading datasets…</p>}
             {library.isError && <p role="alert" className="error-banner">{library.error.message}</p>}
             <EvaluationDatasets datasets={datasets} selected={selected} onChange={changeSelection} busy={activeEvaluation} />
@@ -716,20 +721,42 @@ export function EvaluationPage() {
         <section className="config-primary">
           <div className="section-number">02</div>
           <div className="config-content">
-            <div className="config-heading"><div><span>Models under test</span><h2>Choose answer providers</h2></div>
-              <span className="selection-count">{answerProviders.length} selected</span></div>
-            <ProviderPicker selected={answerProviders} onChange={setAnswerProviders} />
+            <div className="config-heading"><div><span>JSONL Developer Reference</span><h2>Create your evaluation files</h2></div></div>
+            <EvaluationReference />
           </div>
         </section>
         <section className="config-primary">
           <div className="section-number">03</div>
+          <div className="config-content">
+            <div className="config-heading"><div><span>LLM Provider Configuration</span><h2>API keys and models</h2></div></div>
+            <EvaluationProviderStatus configurations={credentials.configurations} loading={credentials.isLoading}
+              error={credentials.isError} onRetry={() => credentials.refetch()} />
+          </div>
+        </section>
+        <section className="config-primary">
+          <div className="section-number">04</div>
+          <div className="config-content">
+            <div className="config-heading"><div><span>Evaluation Configuration</span><h2>Choose answer providers</h2></div>
+              <span className="selection-count">{answerProviders.length} selected</span></div>
+            <ProviderPicker selected={answerProviders} onChange={changeAnswerProviders}
+              configurations={credentials.configurations} loading={credentials.isLoading} />
+          </div>
+        </section>
+        <section className="config-primary">
+          <div className="section-number" aria-hidden="true" />
           <div className="config-content config-split">
             <div>
               <div className="config-heading"><div><span>Independent grader</span><h2>Choose the judge model</h2></div></div>
               <label className="select-field">
                 <Sparkles size={17} />
-                <select aria-label="Judge provider" value={judgeProvider} onChange={(event) => setJudgeProvider(event.target.value as Provider)}>
-                  {PROVIDERS.map((provider) => <option value={provider.id} key={provider.id}>{provider.name}</option>)}
+                <select aria-label="Judge provider" value={judgeProvider} onChange={(event) => changeJudgeProvider(event.target.value as Provider | '')}>
+                  <option value="">Choose a configured judge</option>
+                  {PROVIDERS.map((provider) => {
+                    const configuration = credentials.configurations.find((item) => item.provider === provider.id)!
+                    return <option value={provider.id} key={provider.id} disabled={credentials.isLoading || configuration.status !== 'configured'}>
+                      {provider.name} · {configuration.model_name || 'No model'} · {PROVIDER_STATUS_LABELS[configuration.status]}
+                    </option>
+                  })}
                 </select><ChevronDown size={16} />
               </label>
               <small className="field-help">The judge grades answers against your references and retrieved evidence.</small>
@@ -742,12 +769,15 @@ export function EvaluationPage() {
         </section>
         <div className="run-bar">
           <div><Layers3 size={18} /><span><strong>{selected.length} dataset(s) selected</strong>
-            {answerProviders.length} answer models · {providerName(judgeProvider)} judge</span></div>
-          <button className="primary-button" type="submit" disabled={activeEvaluation || !selected.length || !answerProviders.length}>
+            {answerProviders.length} answer models · {judgeProvider ? providerName(judgeProvider) : 'No'} judge</span></div>
+          <button className="primary-button" type="submit" disabled={activeEvaluation || checkingBeforeRun || credentials.isLoading || Boolean(configurationError)}>
             {activeEvaluation ? <i className="spinner" /> : <Play size={17} />}
-            {activeEvaluation ? 'Evaluation running' : 'Run Evaluation'}
+            {activeEvaluation ? 'Evaluation running' : checkingBeforeRun ? 'Checking credentials…' : 'Run Evaluation'}
           </button>
         </div>
+        {(credentialValidationError || configurationError) && <div className="evaluation-configuration-notice" role={credentialValidationError ? 'alert' : 'status'}>
+          <span>{credentialValidationError || configurationError}</span> <Link to="/settings">Configure in Settings</Link>
+        </div>}
       </form>
       {evaluationMutation.isError && <div className="error-banner" role="alert"><strong>Evaluation could not start.</strong><span>{evaluationMutation.error.message}</span></div>}
       {evaluationStatus.isError && <div className="error-banner" role="alert">{evaluationStatus.error.message}

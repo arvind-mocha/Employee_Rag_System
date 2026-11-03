@@ -38,11 +38,21 @@ At least one of semantic or keyword search must be enabled.
 
 | Method | Endpoint | Success | Purpose |
 | --- | --- | --- | --- |
-| `GET` | `/settings/providers` | `200` | List active credentials as masked metadata |
+| `GET` | `/settings/providers` | `200` | List masked active credentials and configuration status for all providers |
 | `POST` | `/settings/providers` | `201` | Encrypt and save or replace a credential |
 | `DELETE` | `/settings/providers/{provider}` | `204` | Delete a saved provider credential |
 
 Provider names are `gemini`, `openai`, `anthropic`, and `grok`.
+
+The existing GET response retains `credentials` and adds `providers`, with one
+entry per supported provider: `provider`, `model_name`, `expires_at`, `status`,
+and `message`. Status is `configured`, `not_configured`, `expired`, or
+`unavailable`. `configured` indicates saved, non-expired configuration, not
+provider-side verification. No key, ciphertext, nonce, or key hint is included
+in the status entries. The existing `credentials` metadata still includes masked
+key hints. An unavailable credential store returns `503`; clients must display
+Configuration Unavailable rather than trusting cached configuration.
+
 
 ### Evaluation
 
@@ -50,6 +60,8 @@ Provider names are `gemini`, `openai`, `anthropic`, and `grok`.
 | --- | --- | --- | --- |
 | `POST` | `/evaluations/datasets/upload` | `201` | Validate and persist one or multiple JSONL files |
 | `GET` | `/evaluations/datasets` | `200` | List metadata for all datasets |
+| `GET` | `/evaluations/reference/example` | `200` | Download the tracked five-record JSONL example |
+| `GET` | `/evaluations/reference/schema` | `200` | Record JSON Schema, categories, and configured limits |
 | `GET` | `/evaluations/datasets/{dataset_id}` | `200` | Metadata and paginated record preview (`offset`, `limit`, max 100) |
 | `DELETE` | `/evaluations/datasets/{dataset_id}` | `200` | Delete one specific dataset |
 | `POST` | `/evaluations/run` | `200` | Evaluate explicitly selected dataset IDs synchronously |
@@ -147,11 +159,23 @@ The underlying request format is:
 `expires_in_hours` must be between `0.25` and `8760`. The response never returns
 the plaintext key.
 
+### Download the evaluation template
+
+```bash
+curl -o evaluation_dataset.example.jsonl \
+  http://localhost:8000/api/v1/evaluations/reference/example
+```
+
+The response uses `application/x-ndjson` and an attachment filename. It is the
+same file used by the frontend preview and copy action. The schema endpoint
+returns `record_schema`, `categories`, `maximum_file_size_bytes`,
+`maximum_records`, and `maximum_upload_files` from runtime configuration.
+
 ### Upload evaluation files
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/evaluations/datasets/upload \
-  -F 'files=@examples/evaluation.jsonl' \
+  -F 'files=@examples/evaluation_dataset.example.jsonl' \
   -F 'files=@another-dataset.jsonl'
 ```
 
@@ -187,8 +211,13 @@ curl -X POST http://localhost:8000/api/v1/evaluations/run/async \
 
 The selected IDs must be nonempty, unique, and available. Optional `record_ids`
 restricts cases within each selected file and must exist in every selected file.
-Provider and retrieval settings apply to all selected datasets. Unselected files
-are never evaluated. The async response contains `job_id` and `status_url`;
+Provider and retrieval settings apply to all selected datasets. Both run endpoints check
+that each selected answer/judge provider has a saved non-expired key and model;
+the worker repeats this check at execution. Missing/expired credentials or model
+configuration produce `422` with the affected provider and a Settings action;
+credential-store failures produce `503`. A failed preflight queues no work.
+
+Unselected files are never evaluated. The async response contains `job_id` and `status_url`;
 poll that URL to retrieve `completed_cases`, `total_cases`, `current_dataset_id`,
 status, and result. Both synchronous responses and completed async `result`
 contain `run_id`, `datasets` (independent per-file runs), and `aggregate` (combined

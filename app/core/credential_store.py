@@ -1,7 +1,7 @@
 """Encrypted PostgreSQL storage for customer-supplied LLM credentials."""
 
 from base64 import b64decode, urlsafe_b64encode
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from functools import lru_cache
 import os
@@ -43,13 +43,14 @@ class StoredCredential:
     expires_at: datetime
     created_at: datetime
     updated_at: datetime
+    has_api_key: bool = True
 
 
 @dataclass(frozen=True, slots=True)
 class ActiveCredential:
     provider: str
     model_name: str
-    api_key: str
+    api_key: str = field(repr=False)
     expires_at: datetime
 
 
@@ -248,22 +249,24 @@ class CredentialStore:
             raise CredentialStoreUnavailable("Provider settings were not saved.")
         return self._stored_credential(row)
 
-    def list_active(self) -> list[StoredCredential]:
+    def list_active(self, *, include_expired: bool = False) -> list[StoredCredential]:
         self._ensure_schema()
         try:
             with self._connect() as connection:
                 with connection.cursor(row_factory=dict_row) as cursor:
-                    cursor.execute(
-                        "DELETE FROM provider_credentials "
-                        "WHERE expires_at <= CURRENT_TIMESTAMP"
-                    )
+                    self._clear_expired_secrets(cursor)
                     cursor.execute(
                         """
                         SELECT provider, model_name, key_hint, expires_at,
-                               created_at, updated_at
+                               created_at, updated_at,
+                               (octet_length(encrypted_api_key) > 0
+                                AND octet_length(nonce) = 12
+                                AND key_version = %s) AS has_api_key
                         FROM provider_credentials
+                        WHERE %s OR expires_at > CURRENT_TIMESTAMP
                         ORDER BY provider
-                        """
+                        """,
+                        (KEY_VERSION, include_expired),
                     )
                     rows = cursor.fetchall()
         except psycopg.Error as error:
@@ -278,17 +281,13 @@ class CredentialStore:
         try:
             with self._connect() as connection:
                 with connection.cursor(row_factory=dict_row) as cursor:
-                    cursor.execute(
-                        "DELETE FROM provider_credentials "
-                        "WHERE provider = %s AND expires_at <= CURRENT_TIMESTAMP",
-                        (provider,),
-                    )
+                    self._clear_expired_secrets(cursor)
                     cursor.execute(
                         """
                         SELECT provider, model_name, encrypted_api_key, nonce,
                                key_version, expires_at
                         FROM provider_credentials
-                        WHERE provider = %s
+                        WHERE provider = %s AND expires_at > CURRENT_TIMESTAMP
                         """,
                         (provider,),
                     )
@@ -333,19 +332,29 @@ class CredentialStore:
         return deleted
 
     def delete_expired(self) -> int:
+        """Erase expired secrets, keeping only metadata for configuration status."""
         self._ensure_schema()
         try:
             with self._connect() as connection:
                 with connection.cursor() as cursor:
-                    cursor.execute(
-                        "DELETE FROM provider_credentials "
-                        "WHERE expires_at <= CURRENT_TIMESTAMP"
-                    )
+                    self._clear_expired_secrets(cursor)
                     return max(cursor.rowcount, 0)
         except psycopg.Error as error:
             raise CredentialStoreUnavailable(
                 "PostgreSQL is unavailable; expired credentials were not deleted."
             ) from error
+
+    @staticmethod
+    def _clear_expired_secrets(cursor) -> None:
+        cursor.execute(
+            """
+            UPDATE provider_credentials
+            SET encrypted_api_key = ''::bytea, nonce = ''::bytea, key_hint = ''
+            WHERE expires_at <= CURRENT_TIMESTAMP
+              AND (octet_length(encrypted_api_key) > 0
+                   OR octet_length(nonce) > 0 OR key_hint <> '')
+            """
+        )
 
     def _ensure_schema(self) -> None:
         if self._initialized:
@@ -448,6 +457,7 @@ class CredentialStore:
             expires_at=row["expires_at"],  # type: ignore[arg-type]
             created_at=row["created_at"],  # type: ignore[arg-type]
             updated_at=row["updated_at"],  # type: ignore[arg-type]
+            has_api_key=bool(row.get("has_api_key", True)),
         )
 
 

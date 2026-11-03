@@ -10,6 +10,7 @@ from app.api.schemas.settings import (
     ProviderCredentialRequest,
     ProviderCredentialResponse,
 )
+from app.api.services.provider_configuration import configuration_statuses
 from app.core.credential_store import (
     CredentialStoreConfigurationError,
     CredentialStoreUnavailable,
@@ -38,11 +39,18 @@ def _service_unavailable(error: Exception) -> HTTPException:
 
 def list_provider_credentials() -> ProviderCredentialListResponse:
     try:
-        credentials = get_credential_store().list_active()
-    except (CredentialStoreConfigurationError, CredentialStoreUnavailable) as error:
-        raise _service_unavailable(error) from error
+        credentials = get_credential_store().list_active(include_expired=True)
+    except (CredentialStoreConfigurationError, CredentialStoreUnavailable):
+        raise HTTPException(
+            status_code=503,
+            detail="Provider configuration is unavailable. Check Settings and retry.",
+        ) from None
     return ProviderCredentialListResponse(
-        credentials=[_response(credential) for credential in credentials]
+        credentials=[
+            _response(credential) for credential in credentials
+            if credential.expires_at > datetime.now(timezone.utc)
+        ],
+        providers=configuration_statuses(credentials),
     )
 
 

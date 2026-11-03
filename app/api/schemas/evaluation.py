@@ -1,7 +1,7 @@
 """Request and response schemas for uploaded evaluation datasets."""
 
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -52,6 +52,14 @@ class EvaluationDatasetMetadata(BaseModel):
 
 class EvaluationDatasetList(BaseModel):
     datasets: list[EvaluationDatasetMetadata]
+
+
+class EvaluationSchemaReference(BaseModel):
+    maximum_file_size_bytes: int
+    maximum_records: int
+    maximum_upload_files: int
+    categories: list[str]
+    record_schema: dict[str, Any]
 
 
 class EvaluationDatasetPreview(EvaluationDatasetMetadata):

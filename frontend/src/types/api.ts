@@ -11,6 +11,26 @@ export interface ProviderCredential {
 
 export interface ProviderCredentialListResponse {
   credentials: ProviderCredential[]
+  providers: ProviderConfigurationStatus[]
+}
+
+export interface ProviderConfigurationStatus {
+  provider: Provider
+  model_name: string | null
+  expires_at: string | null
+  status: 'configured' | 'not_configured' | 'expired' | 'unavailable'
+  message: string
+}
+
+export interface EvaluationSchemaReference {
+  maximum_file_size_bytes: number
+  maximum_records: number
+  maximum_upload_files: number
+  categories: string[]
+  record_schema: {
+    required: string[]
+    properties: Record<string, { type?: string; description?: string }>
+  }
 }
 
 export interface ProviderCredentialRequest {
