@@ -160,11 +160,16 @@ export const api = {
     dataset_ids: string[]
     answer_providers: Provider[]
     judge_provider: Provider
+    concurrency: number
   } & RetrievalOptions) =>
     request<EvaluationJobAccepted>('/evaluations/run/async', {
       method: 'POST',
       body: JSON.stringify(payload),
     }),
+
+  cancelEvaluation: (jobId: string) => request<{ job_id: string; status: string }>(
+    `/evaluations/jobs/${encodeURIComponent(jobId)}/cancel`, { method: 'POST' },
+  ),
 
   getJob: (statusUrl: string) => {
     const path = statusUrl.startsWith('/api/v1')

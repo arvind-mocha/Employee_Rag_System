@@ -13,6 +13,12 @@ from app.core.redis_client import RedisSettings
 class RedisEvaluationJobApiTests(unittest.TestCase):
     def setUp(self) -> None:
         self.client = TestClient(app)
+        for target in ("app.api.controllers.evaluation.validate_runtime_preflight",
+                       "app.api.controllers.evaluation_jobs.validate_runtime_preflight"):
+            preflight = patch(target, return_value={})
+            preflight.start()
+            self.addCleanup(preflight.stop)
+
         validation = patch("app.api.controllers.evaluation_jobs.validate_evaluation_providers")
         validation.start()
         self.addCleanup(validation.stop)

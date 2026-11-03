@@ -107,6 +107,7 @@ class ChatModelFactoryTests(unittest.TestCase):
             api_key="gemini-secret",
             max_output_tokens=512,
             timeout=120,
+            max_retries=0,
         )
 
     @patch("app.api.llm.ChatOpenAI")

@@ -3,17 +3,26 @@
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
+from functools import cached_property
+import asyncio
+import inspect
 import json
+import logging
+import math
+from time import sleep
 from typing import Any, Callable, Sequence
 
+from anthropic import AsyncAnthropic
 from langchain_core.messages import BaseMessage
 from langchain_core.tools import tool
 from langchain_anthropic import ChatAnthropic
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
+from openai import DefaultAsyncHttpxClient
 from pydantic import BaseModel
 
+from app.core.evaluation_context import EVALUATION_RUNTIME, CASE_TRACE
 from app.api import config
 from app.api.llm_usage import LLMUsage, calculate_llm_usage
 from app.api.prompts import (
@@ -21,6 +30,7 @@ from app.api.prompts import (
     build_tool_selection_messages,
     format_retrieval_context,
 )
+from app.core.safe_errors import provider_failure, log_safe_exception
 from app.core.credential_store import (
     CredentialStoreConfigurationError,
     CredentialStoreUnavailable,
@@ -33,6 +43,14 @@ DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
 DEFAULT_GROK_BASE_URL = config.GROK_BASE_URL
 MAX_ANSWER_TOKENS = 512
 MODEL_TIMEOUT_SECONDS = 120
+
+
+class _OwnedAsyncChatAnthropic(ChatAnthropic):
+    """Keep evaluation cleanup from closing LangChain's shared HTTP pool."""
+
+    @cached_property
+    def _async_client(self) -> AsyncAnthropic:
+        return AsyncAnthropic(**self._client_params)
 
 
 class LLMProvider(StrEnum):
@@ -49,9 +67,20 @@ class LLMConfigurationError(ValueError):
 class LLMProviderRequestError(RuntimeError):
     """Raised with a safe explanation of an upstream provider failure."""
 
-    def __init__(self, provider: LLMProvider, detail: str) -> None:
+    def __init__(
+        self,
+        provider: LLMProvider,
+        detail: str,
+        *,
+        category: str = "provider_request",
+        retryable: bool = False,
+        model: str | None = None,
+    ) -> None:
         self.provider = provider
         self.detail = detail
+        self.category = category
+        self.retryable = retryable
+        self.model = model
         super().__init__(detail)
 
 
@@ -163,6 +192,8 @@ def create_chat_model_client(
     settings: LLMSettings | None = None,
     *,
     max_output_tokens: int = MAX_ANSWER_TOKENS,
+    timeout_seconds: int = MODEL_TIMEOUT_SECONDS,
+    own_async_client: bool = False,
 ) -> ChatModelClient:
     """Create the LangChain chat model configured for one provider."""
     if max_output_tokens < 1:
@@ -171,27 +202,37 @@ def create_chat_model_client(
     settings = settings or _stored_llm_settings(provider)
     settings.validate_provider(provider)
     model_name = settings.model_for(provider)
+    async_options = (
+        {"http_async_client": DefaultAsyncHttpxClient(timeout=timeout_seconds)}
+        if own_async_client and provider in {LLMProvider.OPENAI, LLMProvider.GROK}
+        else {}
+    )
 
     if provider is LLMProvider.GEMINI:
         model: BaseChatModel = ChatGoogleGenerativeAI(
             model=model_name,
             api_key=settings.gemini_api_key,
             max_output_tokens=max_output_tokens,
-            timeout=MODEL_TIMEOUT_SECONDS,
+            timeout=timeout_seconds,
+            max_retries=0,
         )
     elif provider is LLMProvider.OPENAI:
         model = ChatOpenAI(
             model=model_name,
             api_key=settings.openai_api_key,
             max_completion_tokens=max_output_tokens,
-            timeout=MODEL_TIMEOUT_SECONDS,
+            timeout=timeout_seconds,
+            max_retries=0,
+            **async_options,
         )
     elif provider is LLMProvider.ANTHROPIC:
-        model = ChatAnthropic(
+        anthropic_class = _OwnedAsyncChatAnthropic if own_async_client else ChatAnthropic
+        model = anthropic_class(
             model_name=model_name,
             api_key=settings.anthropic_api_key,
             max_tokens_to_sample=max_output_tokens,
-            timeout=MODEL_TIMEOUT_SECONDS,
+            timeout=timeout_seconds,
+            max_retries=0,
         )
     else:
         model = ChatOpenAI(
@@ -199,8 +240,10 @@ def create_chat_model_client(
             api_key=settings.grok_api_key,
             base_url=settings.grok_base_url,
             max_completion_tokens=max_output_tokens,
-            timeout=MODEL_TIMEOUT_SECONDS,
+            timeout=timeout_seconds,
+            max_retries=0,
             use_responses_api=False,
+            **async_options,
         )
 
     return ChatModelClient(provider, model_name, model)
@@ -210,11 +253,15 @@ def get_chat_model_client(
     provider: LLMProvider,
     *,
     max_output_tokens: int = MAX_ANSWER_TOKENS,
+    timeout_seconds: int = MODEL_TIMEOUT_SECONDS,
+    own_async_client: bool = False,
 ) -> ChatModelClient:
     """Build a client from the active, unexpired database credential."""
     return create_chat_model_client(
         provider,
         max_output_tokens=max_output_tokens,
+        timeout_seconds=timeout_seconds,
+        own_async_client=own_async_client,
     )
 
 
@@ -278,40 +325,7 @@ def _provider_error_detail(
     provider: LLMProvider,
     error: Exception,
 ) -> str:
-    message = str(error).casefold()
-    if (
-        "authentication" in message
-        or "unauthorized" in message
-        or "api key not valid" in message
-        or "api_key_invalid" in message
-        or "401" in message
-    ):
-        return f"{provider.value} rejected its configured API key."
-    if "rate limit" in message or "quota" in message or "429" in message:
-        return f"{provider.value} rate limit or account quota was exceeded."
-    if "model_not_found" in message or "not found" in message or "404" in message:
-        return (
-            f"{provider.value} could not access the configured model. "
-            "Verify the model ID and account permissions."
-        )
-    if "temperature" in message:
-        return (
-            f"{provider.value} rejected the configured generation parameters."
-        )
-    if "tool" in message and (
-        "not support" in message
-        or "unsupported" in message
-        or "unexpected" in message
-        or "invalid" in message
-    ):
-        return (
-            f"The configured {provider.value} model does not support tool "
-            "calling. Choose a tool-capable model in Settings."
-        )
-    return (
-        f"{provider.value} request failed ({type(error).__name__}). "
-        "Check the server logs for the upstream error."
-    )
+    return f"{provider.value} {provider_failure(error)[1]}"
 
 
 def generate_grounded_answer(
@@ -322,9 +336,6 @@ def generate_grounded_answer(
     history: Sequence[tuple[str, str]] = (),
 ) -> GeneratedAnswer:
     """Generate one answer grounded in the supplied retrieved chunks."""
-    if not chunks:
-        raise ValueError("at least one retrieved chunk is required")
-
     generated = invoke_chat_model(
         build_answer_messages(question, chunks, history),
         provider,
@@ -387,6 +398,7 @@ def _invoke_client(
     messages: Sequence[BaseMessage],
     runnable: Any | None = None,
     response_schema: type[BaseModel] | None = None,
+    max_attempts: int = 3,
 ) -> tuple[BaseMessage, LLMUsage]:
     try:
         selected_runnable = runnable if runnable is not None else client.model
@@ -397,28 +409,49 @@ def _invoke_client(
                 method="json_schema",
                 include_raw=True,
             )
-        result = selected_runnable.invoke(messages)
-        parsed = None
-        if uses_native_structure:
-            if not isinstance(result, Mapping):
-                raise TypeError(
-                    "Structured output did not include its raw response."
-                )
-            response = result.get("raw")
-            parsed = result.get("parsed")
-            if not isinstance(response, BaseMessage):
-                raise TypeError(
-                    "Structured output did not include a model message."
-                )
-        else:
-            response = result
-            if not isinstance(response, BaseMessage):
-                raise TypeError("The model did not return a chat message.")
+        for attempt in range(max_attempts):
+            try:
+                result = selected_runnable.invoke(messages)
+                break
+            except Exception as error:
+                if not provider_failure(error)[2] or attempt == max_attempts - 1:
+                    raise
+                sleep(0.5 * (2 ** attempt))
+        return _normalize_response(client, messages, result, response_schema, uses_native_structure)
+    except LLMProviderRequestError:
+        raise
     except Exception as error:
         raise LLMProviderRequestError(
             client.provider,
             _provider_error_detail(client.provider, error),
+            category=provider_failure(error)[0],
+            retryable=provider_failure(error)[2],
+            model=client.model_name,
         ) from error
+
+
+def _normalize_response(client, messages, result, response_schema, uses_native_structure):
+    parsed = None
+    if uses_native_structure:
+        if not isinstance(result, Mapping):
+            raise TypeError(
+                "Structured output did not include its raw response."
+            )
+        response = result.get("raw")
+        parsed = result.get("parsed")
+        if result.get("parsing_error") is not None:
+            raise LLMProviderRequestError(
+                client.provider, "The judge returned invalid structured output.",
+                category="judge_response_parsing", model=client.model_name,
+            )
+        if not isinstance(response, BaseMessage):
+            raise TypeError(
+                "Structured output did not include a model message."
+            )
+    else:
+        response = result
+        if not isinstance(response, BaseMessage):
+            raise TypeError("The model did not return a chat message.")
     usage = calculate_llm_usage(
         messages,
         response,
@@ -558,22 +591,131 @@ def invoke_chat_model(
     *,
     max_output_tokens: int = MAX_ANSWER_TOKENS,
     response_schema: type[BaseModel] | None = None,
+    timeout_seconds: int = MODEL_TIMEOUT_SECONDS,
+    max_attempts: int = 3,
 ) -> GeneratedText:
     """Invoke one provider and optionally constrain it to a JSON schema."""
+    runtime = EVALUATION_RUNTIME.get()
+    if runtime is not None:
+        return runtime.invoke(
+            messages, provider, max_output_tokens=max_output_tokens,
+            response_schema=response_schema, timeout_seconds=timeout_seconds, max_attempts=max_attempts,
+        )
+    if not 1 <= max_attempts <= 3:
+        raise ValueError("max_attempts must be between 1 and 3")
     client = get_chat_model_client(
         provider,
         max_output_tokens=max_output_tokens,
+        timeout_seconds=timeout_seconds,
     )
     response, usage = _invoke_client(
         client,
         messages,
         response_schema=response_schema,
+        max_attempts=max_attempts,
     )
 
     text = _message_text(response.content)
     if not text:
         raise LLMProviderRequestError(
             provider,
-            f"{provider.value} returned an empty response.",
+            f"{provider.value} returned an empty response. Check the model output budget and capabilities.",
+            category="provider_empty_response", model=client.model_name,
         )
     return GeneratedText(text, client.provider, client.model_name, usage)
+
+
+async def ainvoke_chat_model(
+    messages: Sequence[BaseMessage],
+    provider: LLMProvider,
+    *,
+    governor,
+    max_output_tokens: int = MAX_ANSWER_TOKENS,
+    response_schema: type[BaseModel] | None = None,
+    timeout_seconds: int = MODEL_TIMEOUT_SECONDS,
+    max_attempts: int = 3,
+) -> GeneratedText:
+    """Native async model I/O with shared evaluation budgets and bounded retries."""
+    if type(max_attempts) is not int or not 1 <= max_attempts <= 3:
+        raise ValueError("max_attempts must be between 1 and 3")
+    # Each invocation owns its client; credential-store operations open and close
+    # their own psycopg connections in the executor, never shared sessions.
+    client = await asyncio.to_thread(
+        get_chat_model_client, provider, max_output_tokens=max_output_tokens,
+        timeout_seconds=timeout_seconds, own_async_client=True,
+    )
+    try:
+        return await _ainvoke_owned_client(
+            client, messages, provider, governor=governor, max_output_tokens=max_output_tokens,
+            response_schema=response_schema, timeout_seconds=timeout_seconds, max_attempts=max_attempts,
+        )
+    finally:
+        # Dispose of each owned async HTTP client on its event loop. This also
+        # runs on cancellation, avoiding leaked connection pools across RQ runs.
+        root = getattr(client.model, "root_async_client", None)
+        if provider is LLMProvider.ANTHROPIC:
+            root = getattr(client.model, "_async_client", None)
+        elif provider is LLMProvider.GEMINI:
+            root = client.model
+        close = getattr(root, "close", None)
+        if not inspect.iscoroutinefunction(close):
+            close = getattr(root, "aclose", None)
+        if inspect.iscoroutinefunction(close):
+            try:
+                await close()
+            except Exception as error:
+                log_safe_exception(logging.getLogger(__name__), error, "Evaluation provider client cleanup failed")
+
+
+async def _ainvoke_owned_client(client, messages, provider, *, governor, max_output_tokens,
+                                response_schema, timeout_seconds, max_attempts):
+    from app.evaluation.rate_limits import ProviderBudgetError, ProviderBudgetUnavailable, retry_delay
+    role = "judge" if response_schema is not None else "answer"
+    schema_text = json.dumps(response_schema.model_json_schema()) if response_schema else ""
+    # Conservative reservation, reconciled with actual provider usage. Exact
+    # tokenization is provider/model-specific; 429 remains authoritative.
+    reserved = math.ceil((sum(len(str(m.content).encode("utf-8")) for m in messages) + len(schema_text.encode("utf-8"))) / 2) + max_output_tokens + 256
+    try:
+        runnable = client.model.with_structured_output(response_schema, method="json_schema", include_raw=True) if response_schema else client.model
+        for attempt in range(max_attempts):
+            try:
+                async with governor.slot(provider.value, role, reserved, timeout_seconds) as usage:
+                    # wait_for also bounds native clients that do not apply their
+                    # timeout consistently, so leases cannot expire mid-request.
+                    result = await asyncio.wait_for(runnable.ainvoke(messages), timeout_seconds)
+                    response, measured = _normalize_response(client, messages, result, response_schema, response_schema is not None)
+                    usage["tokens"] = measured.total_tokens
+                break
+            except (LLMProviderRequestError, ProviderBudgetError):
+                raise
+            except Exception as error:
+                if not provider_failure(error)[2]:
+                    raise
+                delay = retry_delay(error, attempt)
+                # Publish cooldown even on the final attempt or a long
+                # Retry-After, so other jobs do not hammer the same provider.
+                await governor.cooldown(provider.value, delay)
+                if attempt == max_attempts - 1 or delay > 300:
+                    raise
+                trace = CASE_TRACE.get()
+                if trace is not None:
+                    trace.retries += 1
+                # All jobs back off together; smooth admission staggers the next
+                # attempts, and per-attempt jitter avoids synchronized retries.
+                await asyncio.sleep(delay)
+    except LLMProviderRequestError:
+        raise
+    except ProviderBudgetError as error:
+        raise LLMProviderRequestError(
+            provider, str(error), category="provider_unavailable" if isinstance(error, ProviderBudgetUnavailable) else "provider_rate_configuration",
+            retryable=isinstance(error, ProviderBudgetUnavailable), model=client.model_name,
+        ) from error
+    except Exception as error:
+        raise LLMProviderRequestError(
+            provider, _provider_error_detail(provider, error), category=provider_failure(error)[0],
+            retryable=provider_failure(error)[2], model=client.model_name,
+        ) from error
+    text = _message_text(response.content)
+    if not text:
+        raise LLMProviderRequestError(provider, f"{provider.value} returned an empty response. Check the model output budget and capabilities.", category="provider_empty_response", model=client.model_name)
+    return GeneratedText(text, provider, client.model_name, measured)

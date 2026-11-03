@@ -3047,3 +3047,15 @@ button:disabled {
 .example-preview > [role=status] { display: block; margin: 8px 0; font-size: 12px; }
 .evaluation-configuration-notice { padding: 14px 22px; border-top: 1px solid #dce1db; font-size: 13px; line-height: 1.6; }
 @media (max-width: 760px) { .evaluation-provider-status-grid { grid-template-columns: 1fr; } }
+
+.evaluation-progress {
+  display: grid;
+  gap: 8px;
+  padding: 16px;
+  margin: 16px 0;
+  border: 1px solid var(--border, #dedfd8);
+  border-radius: 10px;
+}
+.evaluation-progress progress { width: 100%; }
+.evaluation-progress p { margin: 0; }
+.evaluation-progress small { color: var(--muted, #69716c); }

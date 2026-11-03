@@ -90,6 +90,18 @@ class GroundTruthRecord(BaseModel):
     review_status: ReviewStatus = ReviewStatus.USER_PROVIDED
     metadata: dict[str, Any] = Field(default_factory=dict)
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_optional_nulls(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            value = dict(value)
+            for name in ("keywords", "expected_keywords", "required_facts", "retrieved_evidence",
+                         "relevant_evidence", "reference_evidence", "metadata", "retrieval",
+                         "category", "review_status"):
+                if value.get(name, ...) is None:
+                    value.pop(name)
+        return value
+
     @field_validator("question", "reference_answer", "id")
     @classmethod
     def require_nonblank(cls, value: str) -> str:
@@ -150,6 +162,18 @@ class EvaluationTiming(BaseModel):
 
 
 class EvaluationCaseResult(BaseModel):
+    case_id: str | None = None
+    dataset_order: int = 0
+    record_order: int = 0
+    provider_order: int = 0
+    retry_count: int = 0
+    retrieved_context: list[str] = Field(default_factory=list)
+    run_id: str | None = None
+    job_id: str | None = None
+    error_category: str | None = None
+    failed_stage: str | None = None
+    error_provider: LLMProvider | None = None
+    error_model: str | None = None
     dataset_id: str | None = None
     dataset_name: str | None = None
     record_id: str
@@ -217,7 +241,24 @@ class ProviderEvaluationSummary(BaseModel):
     )
 
 
+class EvaluationPerformance(BaseModel):
+    elapsed_seconds: float = 0.0
+    average_retrieval_ms: float | None = None
+    average_answer_generation_ms: float | None = None
+    average_judge_ms: float | None = None
+    average_case_ms: float | None = None
+    maximum_concurrent_cases: int = 0
+    retry_count: int = 0
+    successful_cases: int = 0
+    error_cases: int = 0
+    low_scoring_cases: int = 0
+
+
 class EvaluationRun(BaseModel):
+    concurrency: int = 1
+    performance: EvaluationPerformance = Field(default_factory=EvaluationPerformance)
+    status: Literal["completed", "partial", "failed", "canceled"] = "completed"
+    error: str | None = None
     run_id: str
     dataset_id: str | None = None
     dataset_name: str

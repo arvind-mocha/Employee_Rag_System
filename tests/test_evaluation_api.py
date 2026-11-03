@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from fastapi.testclient import TestClient
 
@@ -43,6 +43,26 @@ class EvaluationApiTests(unittest.TestCase):
         self.config.start()
         self.addCleanup(self.config.stop)
         self.client = TestClient(app)
+        store_patch = patch("app.evaluation.jobs.EvaluationJobStore", autospec=True)
+        store_mock = store_patch.start()
+        store_mock.return_value.should_cancel.return_value = False
+        self.addCleanup(store_patch.stop)
+        from contextlib import asynccontextmanager
+        class TestGovernor:
+            @asynccontextmanager
+            async def slot(self, *args):
+                yield {"tokens": -1}
+            async def cooldown(self, *args):
+                pass
+        governor_patch = patch("app.evaluation.engine.RedisProviderGovernor", return_value=TestGovernor())
+        governor_patch.start()
+        self.addCleanup(governor_patch.stop)
+        for target in ("app.api.controllers.evaluation.validate_runtime_preflight",
+                       "app.api.controllers.evaluation_jobs.validate_runtime_preflight"):
+            preflight = patch(target, return_value={})
+            preflight.start()
+            self.addCleanup(preflight.stop)
+
         self.credential_store = Mock()
         now = datetime.now(timezone.utc)
         self.credential_store.list_active.return_value = [
@@ -100,6 +120,118 @@ class EvaluationApiTests(unittest.TestCase):
             judge_provider=judge, summaries=[_summary(provider, results) for provider in providers],
             results=results, usage=summarize_llm_usage(result.answer_usage for result in results),
         )
+
+    def test_end_to_end_upload_worker_persistence_and_result_polling(self):
+        from langchain_core.messages import AIMessage
+        from rq.serializers import JSONSerializer
+        from app.api.llm import ChatModelClient
+        from app.evaluation.models import JudgeDraft
+
+        evidence = "Employees receive 15 vacation days annually."
+        item = self.dataset(records=[{**RECORD, "reference_evidence": [{"content": evidence}]}])
+        chunk = RetrievedChunk(content=evidence, relevance_score=1, chunk_id="policy-1",
+                               source_file="policy.md", source_type="markdown", section=None, chunk_index=0)
+        answer_model, judge_model = Mock(), Mock()
+        answer_model.invoke.return_value = AIMessage(content=evidence + " [1]", usage_metadata={
+            "input_tokens": 10, "output_tokens": 5, "total_tokens": 15,
+        })
+        answer_model.ainvoke = AsyncMock(return_value=answer_model.invoke.return_value)
+        judge_model.with_structured_output.return_value.invoke.return_value = {
+            "raw": AIMessage(content="", usage_metadata={"input_tokens": 15, "output_tokens": 10, "total_tokens": 25}),
+            "parsed": JudgeDraft(completeness=1, relevance=1, correctness=1, groundedness=1,
+                                 rationale="Supported by the retrieved policy."), "parsing_error": None,
+        }
+        judge_model.with_structured_output.return_value.ainvoke = AsyncMock(return_value=judge_model.with_structured_output.return_value.invoke.return_value)
+        clients = {LLMProvider.OPENAI: ChatModelClient(LLMProvider.OPENAI, "answer-model", answer_model),
+                   LLMProvider.ANTHROPIC: ChatModelClient(LLMProvider.ANTHROPIC, "judge-model", judge_model)}
+        job = Mock(id="integration-job", meta={}, enqueued_at=None, started_at=None, ended_at=None)
+        job.get_status.return_value = "finished"
+        with patch("app.api.controllers.evaluation_jobs.get_evaluation_queue") as queue:
+            queue.return_value.enqueue_call.return_value = job
+            queued = self.client.post(f"{BASE}/run/async", json=self.request_run([item["dataset_id"]]))
+            self.assertEqual(queued.status_code, 202, queued.text)
+            payload = queue.return_value.enqueue_call.call_args.kwargs["args"][0]
+        with patch("app.evaluation.jobs.get_current_job", return_value=job), \
+             patch("app.evaluation.engine.get_query_router", return_value=Mock(search=Mock(return_value=[chunk]))), \
+             patch("app.api.llm.get_chat_model_client", side_effect=lambda provider, **_: clients[provider]), \
+             patch("app.evaluation.engine.semantic_similarity", return_value=1):
+            output = run_evaluation_job(payload)
+        self.assertTrue(output["ok"], output)
+        # Same JSON serializer RQ uses for Redis result persistence; read it back through the HTTP handler.
+        job.result = JSONSerializer.loads(JSONSerializer.dumps(output))
+        job.get_meta.return_value = job.meta
+        with patch("app.api.controllers.evaluation_jobs.Job.fetch", return_value=job), \
+             patch("app.api.controllers.evaluation_jobs.get_redis_connection"), \
+             patch("app.api.controllers.evaluation_jobs.get_evaluation_queue"):
+            polled = self.client.get(f"{BASE}/jobs/{job.id}")
+        self.assertEqual(polled.status_code, 200, polled.text)
+        body = polled.json()
+        self.assertEqual(body["status"], "completed")
+        case = body["result"]["aggregate"]["results"][0]
+        self.assertTrue(case["passed"])
+        self.assertEqual(case["answer_scores"]["overall"], 1)
+        self.assertEqual(case["retrieval_scores"]["recall_at_k"], 1)
+        self.assertEqual(case["answer_scores"]["citation_validity"], 1)
+        self.assertEqual(case["usage"]["total_tokens"], 40)
+        self.assertEqual(case["dataset_id"], item["dataset_id"])
+        self.assertEqual(case["record_id"], "line-1")
+        self.assertEqual(case["run_id"], body["result"]["run_id"])
+        self.assertEqual(case["job_id"], job.id)
+        self.assertEqual(case["judge_model"], "judge-model")
+        self.assertIsNone(case["error"])
+        self.assertEqual(job.meta["completed_cases"], 1)
+        self.assertNotIn("private-test-key", polled.text)
+
+    def test_all_error_job_reports_failure_and_retains_case_details(self):
+        item = self.dataset()
+        job = Mock(id="failed-integration-job", meta={}, enqueued_at=None, started_at=None, ended_at=None)
+        with patch("app.evaluation.jobs.get_current_job", return_value=job), \
+             patch("app.evaluation.engine.get_query_router", side_effect=RuntimeError("private-database-url")):
+            output = run_evaluation_job(self.request_run([item["dataset_id"]]))
+        self.assertFalse(output["ok"])
+        self.assertEqual(output["result"]["aggregate"]["status"], "failed")
+        self.assertEqual(len(output["result"]["aggregate"]["results"]), 1)
+        job.result = output
+        job.get_status.return_value = "finished"
+        job.get_meta.return_value = job.meta
+        with patch("app.api.controllers.evaluation_jobs.Job.fetch", return_value=job), \
+             patch("app.api.controllers.evaluation_jobs.get_redis_connection"), \
+             patch("app.api.controllers.evaluation_jobs.get_evaluation_queue"):
+            response = self.client.get(f"{BASE}/jobs/{job.id}")
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(body["status"], "failed")
+        self.assertIn("No cases", body["error"])
+        case = body["result"]["aggregate"]["results"][0]
+        self.assertEqual(case["error_category"], "retrieval_failure")
+        self.assertEqual(case["failed_stage"], "retrieval")
+        self.assertEqual(case["job_id"], job.id)
+        self.assertIsNone(case["answer_scores"])
+        self.assertNotIn("private-database-url", response.text)
+
+    def test_mixed_successful_and_errored_cases_preserve_successful_results(self):
+        item = self.dataset(records=[{**RECORD, "id": "good"}, {**RECORD, "id": "bad"}])
+        chunk = RetrievedChunk(content="15 vacation days.", relevance_score=1, chunk_id="1",
+                               source_file="policy.md", source_type="markdown", section=None, chunk_index=0)
+        router = Mock()
+        router.search.side_effect = [[chunk], RuntimeError("private-db-error")]
+        job = Mock(id="partial-job", meta={})
+        with patch("app.evaluation.jobs.get_current_job", return_value=job), \
+             patch("app.evaluation.engine.get_query_router", return_value=router), \
+             patch("app.evaluation.engine.generate_grounded_answer", return_value=GeneratedAnswer("15 days [1]", LLMProvider.OPENAI, "answer")), \
+             patch("app.evaluation.engine.invoke_chat_model", return_value=GeneratedText(
+                 '{"completeness":1,"relevance":1,"rationale":"Correct"}', LLMProvider.ANTHROPIC, "judge")), \
+             patch("app.evaluation.engine.semantic_similarity", return_value=1):
+            output = run_evaluation_job(self.request_run([item["dataset_id"]]))
+        self.assertTrue(output["ok"])
+        aggregate = output["result"]["aggregate"]
+        self.assertEqual(aggregate["status"], "partial")
+        self.assertTrue(aggregate["results"][0]["passed"])
+        self.assertIsNone(aggregate["results"][1]["passed"])
+        self.assertEqual(aggregate["summaries"][0]["evaluated"], 1)
+        self.assertEqual(aggregate["summaries"][0]["errors"], 1)
+        self.assertEqual(aggregate["summaries"][0]["average_scores"]["overall"], 1)
+        self.assertEqual(job.meta["completed_cases"], 2)
 
     def test_single_upload_preserves_original_bytes_and_metadata(self):
         content = jsonl(RECORD)
@@ -288,7 +420,7 @@ class EvaluationApiTests(unittest.TestCase):
         payload = call.kwargs["args"][0]
         self.assertEqual(payload["dataset_ids"], [first["dataset_id"]])
         self.assertEqual(payload["expected_hashes"], {first["dataset_id"]: first["dataset_sha256"]})
-        job = Mock(meta={})
+        job = Mock(id="job-1", meta={})
         with patch("app.evaluation.jobs.get_current_job", return_value=job):
             result = run_evaluation_job(payload)
         self.assertTrue(result["ok"])

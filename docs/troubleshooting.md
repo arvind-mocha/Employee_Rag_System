@@ -111,6 +111,31 @@ Unsupported members in a mixed archive are ignored. Duplicate flattened names
 and conflicts with stored files receive numeric suffixes, so uploads never
 silently overwrite existing source files.
 
+## ZIP upload reports inaccessible source storage
+
+If the API logs show `PermissionError: Operation not permitted: '/app/data'`,
+check that the host's `data/` directory still exists. Deleting or replacing a
+directory while it is bind-mounted can leave Docker with an inaccessible mount.
+The upload API returns a storage-specific 503 for permission failures.
+
+Create missing directories and recreate the containers that mount source data:
+
+```bash
+mkdir -p data structured_data
+docker compose up -d --force-recreate --no-deps api worker
+```
+
+After the API is healthy, refresh the frontend proxy's cached API address and
+retry the ZIP upload:
+
+```bash
+docker compose exec frontend nginx -s reload
+```
+
+Existing source files and database volumes are preserved. If access still fails,
+check host directory permissions and Docker Desktop's file-sharing access to the
+project directory.
+
 ## No model provider is available
 
 Open **Settings** and save an API key, exact model ID, and future expiry for at
@@ -129,6 +154,15 @@ Check:
 - Provider status and rate limits.
 
 The backend returns a safe provider error but does not return the stored key.
+
+If evaluations fail across multiple providers after a successful first call,
+check the traceback for an HTTP client that has already been closed. Evaluation
+requests must own their async transports; closing LangChain's cached transport
+breaks subsequent preflight and worker calls. Update the application and restart
+the API and worker to load the client-lifecycle fix.
+
+Provider keys come from the encrypted credential store. Changing `.env` does
+not replace a saved key; update it on **Settings** if authentication is rejected.
 
 ## Existing credentials cannot be decrypted
 

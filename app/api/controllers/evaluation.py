@@ -6,6 +6,7 @@ from hashlib import sha256
 import logging
 from typing import Annotated
 from uuid import uuid4
+from time import perf_counter
 
 from fastapi import File, HTTPException, Query, Response, UploadFile, status
 
@@ -31,7 +32,10 @@ from app.evaluation.dataset import (
     store_uploaded_dataset,
     validate_upload_filename,
 )
-from app.evaluation.engine import _summary, run_evaluation
+from app.evaluation.engine import _summary, run_evaluation, performance_summary
+from app.evaluation.preflight import validate_runtime_preflight
+from app.core.safe_errors import log_safe_exception
+from app.core.evaluation_context import EvaluationCancelled
 from app.evaluation.models import EvaluationCategory, EvaluationRun, GroundTruthRecord
 
 
@@ -169,13 +173,33 @@ def execute_selected_evaluation(
     *,
     expected_hashes: dict[str, str] | None = None,
     progress: Callable[[int, int, str], None] | None = None,
+    job_id: str | None = None,
+    on_case_result: Callable | None = None,
+    on_progress: Callable | None = None,
+    on_manifest: Callable | None = None,
+    should_cancel: Callable[[], bool] | None = None,
+    run_id: str | None = None,
 ) -> RunEvaluationResponse:
+    execution_started = perf_counter()
     selected = load_selected_datasets(request, expected_hashes)
     validate_evaluation_providers(request.answer_providers, request.judge_provider)
+    batch_id = run_id or str(uuid4())
     total = sum(len(records) for _, records in selected) * len(request.answer_providers)
     completed = 0
     runs = []
-    for metadata, records in selected:
+    if on_manifest:
+        on_manifest([metadata for metadata, _ in selected], batch_id)
+    if progress is not None:
+        progress(0, total, selected[0][0]["dataset_id"] if selected else "")
+    canceled_before_execution = False
+    try:
+        models = validate_runtime_preflight(request.answer_providers, request.judge_provider, should_cancel=should_cancel) or {}
+    except EvaluationCancelled:
+        models = {}
+        canceled_before_execution = True
+    for dataset_order, (metadata, records) in enumerate(selected):
+        if canceled_before_execution or (should_cancel and should_cancel()):
+            break
         dataset_id = metadata["dataset_id"]
 
         def case_complete() -> None:
@@ -184,27 +208,64 @@ def execute_selected_evaluation(
             if progress is not None:
                 progress(completed, total, dataset_id)
 
+        def enrich_result(result):
+            result.run_id, result.job_id = batch_id, job_id
+            result.dataset_id, result.dataset_name = dataset_id, metadata["filename"]
+            result.answer_model = result.answer_model or models.get(result.answer_provider)
+            result.judge_model = result.judge_model or models.get(result.judge_provider)
+            if result.error:
+                result.error_model = result.error_model or models.get(result.error_provider)
+            if on_case_result:
+                on_case_result(result)
+
+        base_completed = completed
+        prior_results = [r for previous in runs for r in previous.results]
+
+        def report_progress(snapshot):
+            if on_progress:
+                snapshot.update(
+                    completed_cases=base_completed + snapshot["completed_cases"], total_cases=total,
+                    successful_cases=sum(r.error is None for r in prior_results) + snapshot["successful_cases"],
+                    failed_cases=sum(r.error is not None for r in prior_results) + snapshot["failed_cases"],
+                    low_scoring_cases=sum(r.passed is False for r in prior_results) + snapshot["low_scoring_cases"],
+                    retry_count=sum(r.retry_count for r in prior_results) + snapshot["retry_count"],
+                    maximum_concurrent_cases=max(snapshot["maximum_concurrent_cases"], max((r.performance.maximum_concurrent_cases for r in runs), default=0)),
+                    elapsed_seconds=round(perf_counter()-execution_started, 3), current_dataset_id=dataset_id,
+                )
+                snapshot["progress_percent"] = round(100 * snapshot["completed_cases"] / total, 1) if total else 0
+                on_progress(snapshot)
+
         if progress is not None:
             progress(completed, total, dataset_id)
         try:
             run = run_evaluation(
                 dataset_id, records, request.answer_providers, request.judge_provider,
                 request.retrieval_configuration(), content_sha256=metadata["dataset_sha256"],
-                on_case_complete=case_complete,
+                on_case_complete=case_complete, concurrency=request.concurrency,
+                on_case_result=enrich_result, on_progress=report_progress, should_cancel=should_cancel,
+                run_id=batch_id, job_id=job_id, dataset_order=dataset_order,
             )
         except Exception as error:
-            logger.exception("On-demand evaluation failed")
+            log_safe_exception(logger, error, "On-demand evaluation failed")
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                                 detail="The evaluation could not be completed.") from error
         run.dataset_id = dataset_id
         run.dataset_name = metadata["filename"]
         for result in run.results:
-            result.dataset_id = dataset_id
-            result.dataset_name = metadata["filename"]
+            # Also enrich results from alternate engine adapters without callback support.
+            result.run_id, result.job_id = batch_id, job_id
+            result.dataset_id, result.dataset_name = dataset_id, metadata["filename"]
         runs.append(run)
+        if run.status == "canceled":
+            break
     results = [result for run in runs for result in run.results]
-    run_id = str(uuid4())
+    run_id = batch_id
+    canceled = any(run.status == "canceled" for run in runs) or len(runs) < len(selected)
     aggregate = EvaluationRun(
+        concurrency=request.concurrency,
+        performance=performance_summary(results, perf_counter()-execution_started, max((run.performance.maximum_concurrent_cases for run in runs), default=0)),
+        status="canceled" if canceled else "failed" if all(result.error for result in results) else "partial" if any(result.error for result in results) else "completed",
+        error="Evaluation canceled; completed results are preserved." if canceled else "No cases could be evaluated. Expand the case details for errors." if all(result.error for result in results) else None,
         run_id=run_id, dataset_name=f"{len(runs)} selected datasets",
         dataset_sha256=sha256("\n".join(
             f"{run.dataset_id}:{run.dataset_sha256}" for run in runs
