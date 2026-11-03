@@ -263,8 +263,11 @@ def parse_dataset_jsonl(
             record_ids.add(record.id)
             records.append(record)
         except (ValidationError, ValueError) as error:
+            detail = str(error)
+            if isinstance(error, ValidationError):
+                detail = "; ".join(f"{'.'.join(map(str, item['loc']))}: {item['type']}" for item in error.errors(include_input=False))
             raise EvaluationDatasetError(
-                f"invalid JSONL record at line {line_number}: {error}"
+                f"JSONL validation failure at line {line_number}: {detail}"
             ) from error
     if not records:
         raise EvaluationDatasetError("the evaluation dataset is empty")

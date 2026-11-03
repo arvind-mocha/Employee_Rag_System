@@ -8,6 +8,7 @@ from rq.exceptions import NoSuchJobError
 from rq.job import Job
 
 from app.api.controllers.evaluation import load_selected_datasets
+from app.evaluation.preflight import validate_runtime_preflight
 from app.api.services.provider_configuration import validate_evaluation_providers
 from app.api.schemas.evaluation import RunEvaluationRequest
 from app.api.schemas.jobs import (
@@ -66,6 +67,7 @@ def enqueue_evaluation_run(
 ) -> EvaluationJobAccepted:
     selected = load_selected_datasets(request)
     validate_evaluation_providers(request.answer_providers, request.judge_provider)
+    validate_runtime_preflight(request.answer_providers, request.judge_provider, check_worker=True)
     payload = request.model_dump(mode="json")
     payload["expected_hashes"] = {
         meta["dataset_id"]: meta["dataset_sha256"] for meta, _ in selected
@@ -107,6 +109,7 @@ def get_evaluation_job(job_id: str) -> EvaluationJobStatus:
             response_result = result["result"]
         else:
             mapped_status = "failed"
+            response_result = result.get("result")
             error = str(result.get("error") or "Evaluation job failed.")
     elif mapped_status == "failed":
         error = "Evaluation worker failed. Check the worker logs."

@@ -1,3 +1,5 @@
+import { EvaluationErrorDetails } from '../components/EvaluationErrorDetails'
+import { evaluationCaseStatus, evaluationErrorLabel } from '../lib/evaluationStatus'
 import { FormEvent, useMemo, useState } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import {
@@ -276,7 +278,7 @@ function EvaluationDashboard({ run }: { run: EvaluationRun }) {
     <div className="evaluation-dashboard">
       <div className="dashboard-title-row">
         <div>
-          <span className="eyebrow">Latest completed run</span>
+          <span className="eyebrow">Latest evaluation run</span>
           <h2>Evaluation results</h2>
           <p>
             {run.dataset_name} · {run.results.length} model answers · judged by{' '}
@@ -429,6 +431,7 @@ function EvaluationDashboard({ run }: { run: EvaluationRun }) {
         </div>
       </section>
 
+      {run.error && <p role="alert" className="error-banner">{run.error}</p>}
       <section className="results-table-section">
         <div className="section-title">
           <div>
@@ -460,7 +463,7 @@ function EvaluationDashboard({ run }: { run: EvaluationRun }) {
                   <strong>{result.question}</strong>
                   <small>
                     <span className="category-pill">{categoryLabel(result.category)}</span>
-                    {result.dataset_name} · {result.dataset_id?.slice(0, 8)} · {result.record_id} · {result.error ? 'Errored' : result.passed ? 'Passed' : 'Failed'}
+                    {result.dataset_name} · {result.dataset_id?.slice(0, 8)} · {result.record_id} · {evaluationCaseStatus(result)}
                   </small>
                 </span>
                 <span className="evaluation-case-model">
@@ -472,7 +475,7 @@ function EvaluationDashboard({ run }: { run: EvaluationRun }) {
                 </strong>
                 <span className={issueCount || result.error ? 'evaluation-case-issues has-issues' : 'evaluation-case-issues'}>
                   {result.error
-                    ? 'Evaluation error'
+                    ? evaluationErrorLabel(result)
                     : issueCount
                       ? `${issueCount} ${issueCount === 1 ? 'issue' : 'issues'}`
                       : 'No flagged issues'}
@@ -516,6 +519,7 @@ function EvaluationDashboard({ run }: { run: EvaluationRun }) {
             </div>
 
             <div className="case-detail-body">
+              <EvaluationErrorDetails result={selectedCase} />
               <section className="case-answer-block">
                 <span>Generated answer</span>
                 <p>{selectedCase.answer || 'No answer was returned by the model.'}</p>
@@ -658,7 +662,7 @@ export function EvaluationPage() {
     },
   })
   const evaluationStatus = useEvaluationJob(evaluationJob)
-  const completedBatch = evaluationStatus.data?.status === 'completed' && evaluationStatus.data.result
+  const completedBatch = ['completed', 'failed'].includes(evaluationStatus.data?.status ?? '') && evaluationStatus.data?.result
     ? evaluationStatus.data.result as unknown as EvaluationBatchRun : null
   const visibleRun = completedBatch
     ? resultScope === 'aggregate' ? completedBatch.aggregate

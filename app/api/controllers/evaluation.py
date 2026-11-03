@@ -32,6 +32,8 @@ from app.evaluation.dataset import (
     validate_upload_filename,
 )
 from app.evaluation.engine import _summary, run_evaluation
+from app.evaluation.preflight import validate_runtime_preflight
+from app.core.safe_errors import log_safe_exception
 from app.evaluation.models import EvaluationCategory, EvaluationRun, GroundTruthRecord
 
 
@@ -169,9 +171,12 @@ def execute_selected_evaluation(
     *,
     expected_hashes: dict[str, str] | None = None,
     progress: Callable[[int, int, str], None] | None = None,
+    job_id: str | None = None,
 ) -> RunEvaluationResponse:
     selected = load_selected_datasets(request, expected_hashes)
     validate_evaluation_providers(request.answer_providers, request.judge_provider)
+    models = validate_runtime_preflight(request.answer_providers, request.judge_provider) or {}
+    batch_id = str(uuid4())
     total = sum(len(records) for _, records in selected) * len(request.answer_providers)
     completed = 0
     runs = []
@@ -193,18 +198,26 @@ def execute_selected_evaluation(
                 on_case_complete=case_complete,
             )
         except Exception as error:
-            logger.exception("On-demand evaluation failed")
+            log_safe_exception(logger, error, "On-demand evaluation failed")
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                                 detail="The evaluation could not be completed.") from error
         run.dataset_id = dataset_id
         run.dataset_name = metadata["filename"]
         for result in run.results:
+            result.run_id = batch_id
+            result.job_id = job_id
+            result.answer_model = result.answer_model or models.get(result.answer_provider)
+            result.judge_model = result.judge_model or models.get(result.judge_provider)
+            if result.error:
+                result.error_model = result.error_model or models.get(result.error_provider)
             result.dataset_id = dataset_id
             result.dataset_name = metadata["filename"]
         runs.append(run)
     results = [result for run in runs for result in run.results]
-    run_id = str(uuid4())
+    run_id = batch_id
     aggregate = EvaluationRun(
+        status="failed" if all(result.error for result in results) else "partial" if any(result.error for result in results) else "completed",
+        error="No cases could be evaluated. Expand the case details for errors." if all(result.error for result in results) else None,
         run_id=run_id, dataset_name=f"{len(runs)} selected datasets",
         dataset_sha256=sha256("\n".join(
             f"{run.dataset_id}:{run.dataset_sha256}" for run in runs

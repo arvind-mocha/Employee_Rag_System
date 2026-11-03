@@ -5,6 +5,7 @@ from typing import Any
 
 from fastapi import HTTPException
 from rq import get_current_job
+from app.core.safe_errors import log_safe_exception
 
 from app.api.controllers.evaluation import execute_selected_evaluation
 from app.api.schemas.evaluation import RunEvaluationRequest
@@ -27,11 +28,13 @@ def run_evaluation_job(payload: dict[str, Any]) -> dict[str, Any]:
     try:
         request = RunEvaluationRequest.model_validate(payload)
         response = execute_selected_evaluation(request, expected_hashes=expected_hashes,
-                                               progress=progress)
+                                               progress=progress, job_id=job.id if job is not None else None)
+        result = response.model_dump(mode="json")
     except HTTPException as error:
         logger.warning("Background evaluation rejected: %s", error.detail)
         return {"ok": False, "error": str(error.detail)}
     except Exception as error:
-        logger.exception("Background evaluation failed")
+        log_safe_exception(logger, error, "Background evaluation failed")
         return {"ok": False, "error": f"Background evaluation failed ({type(error).__name__})."}
-    return {"ok": True, "result": response.model_dump(mode="json")}
+    return {"ok": response.aggregate.status != "failed", "error": response.aggregate.error,
+            "result": result}

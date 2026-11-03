@@ -3,6 +3,7 @@
 from collections.abc import Callable, Iterable
 from datetime import datetime, timezone
 import json
+import logging
 from statistics import fmean
 from time import perf_counter
 from typing import Any
@@ -24,6 +25,7 @@ from app.api.llm import (
     invoke_chat_model,
 )
 from app.api.llm_usage import LLMUsage, summarize_llm_usage
+from app.core.safe_errors import log_safe_exception
 from app.evaluation.dataset import dataset_sha256, ground_truth_status, text_sha256
 from app.evaluation.models import (
     AnswerScores,
@@ -45,6 +47,8 @@ from app.retrieval.models import RetrievedChunk
 from app.retrieval.query_router import QueryRouter, RetrievalOptions, get_query_router
 from app.retrieval.retrieval_metrics import evaluate_retrieval
 
+
+logger = logging.getLogger(__name__)
 
 PASS_THRESHOLD = 0.80
 JUDGE_GENERATION_MAX_OUTPUT_TOKENS = 4_096
@@ -94,7 +98,7 @@ def _retrieval_scores(
     chunks: list[RetrievedChunk],
 ) -> RetrievalScores | None:
     relevant_hashes = {
-        evidence.content_sha256 for evidence in record.relevant_evidence
+        evidence.content_sha256 or text_sha256(evidence.content) for evidence in record.relevant_evidence
     }
     if not relevant_hashes:
         return None
@@ -133,12 +137,20 @@ def _retrieval_scores(
     )
 
 
-def _safe_error(error: Exception) -> str:
+def _safe_error(error: Exception, stage: str) -> str:
     if isinstance(error, LLMProviderRequestError):
         return error.detail
     if isinstance(error, (LLMConfigurationError, EvaluationOutputError)):
         return str(error)
-    return f"evaluation failed ({type(error).__name__})"
+    messages = {
+        "retrieval": "Retrieval failed. Check knowledge-base ingestion and database availability.",
+        "reference_validation": "Reference validation failed. Check the dataset evidence and source files.",
+        "answer_generation": "Answer generation failed. Check the answer model configuration.",
+        "judge_invocation": "Judge invocation failed. Check the judge model configuration.",
+        "metrics": "Metric calculation failed. Check the backend logs for this case.",
+        "serialization": "Evaluation result serialization failed. Check the backend logs for this case.",
+    }
+    return f"{messages.get(stage, 'Internal evaluation error. Check the backend logs.')} ({type(error).__name__})"
 
 
 def _failed_case(
@@ -158,9 +170,27 @@ def _failed_case(
     judge_model: str | None = None,
     judge_usage: LLMUsage | None = None,
     warnings: list[str] | None = None,
+    retrieval_scores: RetrievalScores | None = None,
     error: Exception,
+    stage: str,
 ) -> EvaluationCaseResult:
     chunks = chunks or []
+    category = {
+        "retrieval": "retrieval_failure", "judge_parsing": "judge_response_parsing",
+        "metrics": "metric_calculation", "reference_validation": "jsonl_validation",
+    }.get(stage, "internal_evaluation")
+    provider = judge_provider if stage.startswith("judge") else answer_provider
+    model = judge_model if stage.startswith("judge") else answer_model
+    if isinstance(error, LLMProviderRequestError):
+        category = error.category
+        provider = error.provider
+        model = error.model or model
+    elif isinstance(error, LLMConfigurationError):
+        category = "provider_configuration"
+        stage = "judge_initialization" if stage.startswith("judge") else "answer_initialization"
+    if category == "judge_response_parsing":
+        stage = "judge_parsing"
+    log_safe_exception(logger, error, f"Evaluation case failed: record={record.id!r} stage={stage} category={category} provider={provider.value}")
     total_ms = (perf_counter() - started_at) * 1000
     return EvaluationCaseResult(
         record_id=record.id,
@@ -186,7 +216,7 @@ def _failed_case(
                 chunk.source_file for chunk in chunks if chunk.source_file
             )
         ),
-        retrieval_scores=_retrieval_scores(record, chunks) if chunks else None,
+        retrieval_scores=retrieval_scores,
         timing=EvaluationTiming(
             retrieval_ms=round(retrieval_ms, 2),
             answer_generation_ms=round(answer_generation_ms, 2),
@@ -194,7 +224,9 @@ def _failed_case(
             total_ms=round(total_ms, 2),
         ),
         warnings=warnings or [],
-        error=_safe_error(error),
+        error=_safe_error(error, stage),
+        error_category=category, failed_stage=stage,
+        error_provider=provider, error_model=model,
     )
 
 
@@ -208,160 +240,94 @@ def evaluate_record(
 ) -> EvaluationCaseResult:
     """Run retrieval, answer generation, and grading for one record."""
     started_at = perf_counter()
-    status = ground_truth_status(record)
+    status = GroundTruthStatus.UNVERIFIABLE
     warnings = []
-    if not record.relevant_evidence:
-        warnings.append("Retrieval metrics unavailable: no reference evidence was supplied.")
-    if answer_provider is judge_provider:
-        warnings.append("The answer and judge use the same provider.")
-
-    query_router = router or get_query_router()
-    retrieval_started = perf_counter()
+    chunks = []
+    generated_answer = judged = None
+    retrieval_scores = None
+    retrieval_ms = answer_ms = grading_ms = 0.0
+    stage = "reference_validation"
+    stage_started = started_at
     try:
-        chunks = query_router.search(
-            record.question,
-            _retrieval_options(retrieval),
-        )
-    except Exception as error:
-        retrieval_ms = (perf_counter() - retrieval_started) * 1000
-        return _failed_case(
-            record,
-            answer_provider,
-            judge_provider,
-            status,
-            started_at,
-            retrieval_ms=retrieval_ms,
-            warnings=warnings,
-            error=error,
-        )
-    retrieval_ms = (perf_counter() - retrieval_started) * 1000
-
-    answer_started = perf_counter()
-    try:
-        generated_answer = generate_grounded_answer(
-            record.question,
-            chunks,
-            answer_provider,
-        )
-    except Exception as error:
-        answer_ms = (perf_counter() - answer_started) * 1000
-        return _failed_case(
-            record,
-            answer_provider,
-            judge_provider,
-            status,
-            started_at,
-            chunks=chunks,
-            retrieval_ms=retrieval_ms,
-            answer_generation_ms=answer_ms,
-            warnings=warnings,
-            error=error,
-        )
-    answer_ms = (perf_counter() - answer_started) * 1000
-
-    grading_started = perf_counter()
-    judged = None
-    try:
+        status = ground_truth_status(record)
+        if not record.relevant_evidence:
+            warnings.append("Retrieval metrics unavailable: no reference evidence was supplied.")
+        if answer_provider is judge_provider:
+            warnings.append("The answer and judge use the same provider.")
+        stage = "retrieval"
+        stage_started = perf_counter()
+        query_router = router or get_query_router()
+        chunks = query_router.search(record.question, _retrieval_options(retrieval))
+        retrieval_ms = (perf_counter() - stage_started) * 1000
+        stage = "metrics"
+        stage_started = perf_counter()
+        retrieval_scores = _retrieval_scores(record, chunks)
+        stage = "answer_generation"
+        stage_started = perf_counter()
+        generated_answer = generate_grounded_answer(record.question, chunks, answer_provider)
+        answer_ms = (perf_counter() - stage_started) * 1000
+        stage = "judge_invocation"
+        stage_started = perf_counter()
         judged = invoke_chat_model(
-            build_judge_messages(record, generated_answer.answer, chunks),
-            judge_provider,
-            max_output_tokens=JUDGE_GENERATION_MAX_OUTPUT_TOKENS,
-            response_schema=JudgeDraft,
+            build_judge_messages(record, generated_answer.answer, chunks), judge_provider,
+            max_output_tokens=JUDGE_GENERATION_MAX_OUTPUT_TOKENS, response_schema=JudgeDraft,
         )
+        stage = "judge_parsing"
         judge = _judge_draft(judged.text)
-    except Exception as error:
-        grading_ms = (perf_counter() - grading_started) * 1000
-        return _failed_case(
-            record,
-            answer_provider,
-            judge_provider,
-            status,
-            started_at,
-            chunks=chunks,
-            retrieval_ms=retrieval_ms,
-            answer_generation_ms=answer_ms,
-            grading_ms=grading_ms,
-            answer=generated_answer.answer,
-            answer_model=generated_answer.model_name,
-            answer_usage=generated_answer.usage,
-            judge_model=judged.model_name if judged is not None else None,
-            judge_usage=judged.usage if judged is not None else None,
+        stage = "metrics"
+        overall = overall_answer_score(completeness=judge.completeness, relevance=judge.relevance)
+        similarity = None
+        try:
+            similarity = semantic_similarity(record.reference_answer, generated_answer.answer)
+        except Exception:
+            warnings.append("Semantic similarity unavailable: the embedding model could not score this answer.")
+        answer_scores = AnswerScores(
+            correctness=judge.correctness, groundedness=judge.groundedness,
+            abstention=judge.abstention if not record.answerable else None,
+            citation_validity=citation_validity(generated_answer.answer, len(chunks)),
+            semantic_similarity=similarity,
+            lexical_similarity=lexical_similarity(record.reference_answer, generated_answer.answer),
+            completeness=judge.completeness, relevance=judge.relevance, overall=overall,
+        )
+        grading_ms = (perf_counter() - stage_started) * 1000
+        stage = "serialization"
+        result = EvaluationCaseResult(
+            record_id=record.id, question=record.question, category=record.category,
+            reference_answer=record.reference_answer, required_facts=record.required_facts,
+            review_status=record.review_status, ground_truth_status=status,
+            answer_provider=generated_answer.provider, answer_model=generated_answer.model_name,
+            judge_provider=judged.provider, judge_model=judged.model_name,
+            answer=generated_answer.answer, answer_usage=generated_answer.usage, judge_usage=judged.usage,
+            usage=summarize_llm_usage([generated_answer.usage, judged.usage]),
+            retrieved_chunk_ids=[chunk.chunk_id or text_sha256(chunk.content) for chunk in chunks],
+            retrieved_sources=list(dict.fromkeys(chunk.source_file for chunk in chunks if chunk.source_file)),
+            retrieval_scores=retrieval_scores, answer_scores=answer_scores,
+            unsupported_claims=judge.unsupported_claims, missing_facts=judge.missing_facts,
+            rationale=judge.rationale,
+            passed=judge.completeness >= PASS_THRESHOLD and judge.relevance >= PASS_THRESHOLD,
+            timing=EvaluationTiming(retrieval_ms=round(retrieval_ms, 2), answer_generation_ms=round(answer_ms, 2),
+                                    grading_ms=round(grading_ms, 2), total_ms=round((perf_counter()-started_at)*1000, 2)),
             warnings=warnings,
-            error=error,
         )
-    overall = overall_answer_score(
-        completeness=judge.completeness,
-        relevance=judge.relevance,
-    )
-    similarity = None
-    try:
-        similarity = semantic_similarity(
-            record.reference_answer, generated_answer.answer,
+        result.model_dump(mode="json")
+        return result
+    except Exception as error:
+        elapsed = (perf_counter() - stage_started) * 1000
+        if stage == "retrieval":
+            retrieval_ms = elapsed
+        elif stage == "answer_generation":
+            answer_ms = elapsed
+        elif stage.startswith("judge") or stage == "metrics":
+            grading_ms = elapsed
+        return _failed_case(
+            record, answer_provider, judge_provider, status, started_at,
+            chunks=chunks, retrieval_ms=retrieval_ms, answer_generation_ms=answer_ms,
+            grading_ms=grading_ms, answer=generated_answer.answer if generated_answer else None,
+            answer_model=generated_answer.model_name if generated_answer else None,
+            answer_usage=generated_answer.usage if generated_answer else None,
+            judge_model=judged.model_name if judged else None, judge_usage=judged.usage if judged else None,
+            warnings=warnings, retrieval_scores=retrieval_scores, error=error, stage=stage,
         )
-    except Exception:
-        warnings.append(
-            "Semantic similarity unavailable: the embedding model could not score this answer."
-        )
-    answer_scores = AnswerScores(
-        correctness=judge.correctness,
-        groundedness=judge.groundedness,
-        abstention=judge.abstention if not record.answerable else None,
-        citation_validity=citation_validity(generated_answer.answer, len(chunks)),
-        semantic_similarity=similarity,
-        lexical_similarity=lexical_similarity(
-            record.reference_answer, generated_answer.answer,
-        ),
-        completeness=judge.completeness,
-        relevance=judge.relevance,
-        overall=overall,
-    )
-    passed = (
-        judge.completeness >= PASS_THRESHOLD
-        and judge.relevance >= PASS_THRESHOLD
-    )
-
-    grading_ms = (perf_counter() - grading_started) * 1000
-    total_ms = (perf_counter() - started_at) * 1000
-    return EvaluationCaseResult(
-        record_id=record.id,
-        question=record.question,
-        category=record.category,
-        reference_answer=record.reference_answer,
-        required_facts=record.required_facts,
-        review_status=record.review_status,
-        ground_truth_status=status,
-        answer_provider=generated_answer.provider,
-        answer_model=generated_answer.model_name,
-        judge_provider=judged.provider,
-        judge_model=judged.model_name,
-        answer=generated_answer.answer,
-        answer_usage=generated_answer.usage,
-        judge_usage=judged.usage,
-        usage=summarize_llm_usage(
-            [generated_answer.usage, judged.usage]
-        ),
-        retrieved_chunk_ids=[
-            chunk.chunk_id or text_sha256(chunk.content) for chunk in chunks
-        ],
-        retrieved_sources=list(
-            dict.fromkeys(
-                chunk.source_file for chunk in chunks if chunk.source_file
-            )
-        ),
-        retrieval_scores=_retrieval_scores(record, chunks),
-        answer_scores=answer_scores,
-        unsupported_claims=judge.unsupported_claims,
-        missing_facts=judge.missing_facts,
-        rationale=judge.rationale,
-        passed=passed,
-        timing=EvaluationTiming(
-            retrieval_ms=round(retrieval_ms, 2),
-            answer_generation_ms=round(answer_ms, 2),
-            grading_ms=round(grading_ms, 2),
-            total_ms=round(total_ms, 2),
-        ),
-        warnings=warnings,
-    )
 
 
 def _mean(values: Iterable[float | None]) -> float | None:
@@ -456,20 +422,32 @@ def run_evaluation(
     on_case_complete: Callable[[], None] | None = None,
 ) -> EvaluationRun:
     """Run a dataset now; this function is never called automatically."""
-    query_router = router or get_query_router()
+    run_id = str(uuid4())
+    query_router = router
     results = []
     for answer_provider in answer_providers:
         for record in records:
-            results.append(
-                evaluate_record(
-                    record, answer_provider, judge_provider, retrieval,
-                    router=query_router,
+            started_at = perf_counter()
+            try:
+                result = evaluate_record(
+                    record, answer_provider, judge_provider, retrieval, router=query_router,
                 )
-            )
+            except Exception as error:
+                # Last-resort isolation if even case error construction fails.
+                result = _failed_case(
+                    record, answer_provider, judge_provider, GroundTruthStatus.UNVERIFIABLE,
+                    started_at, error=error, stage="internal_evaluation",
+                )
+            results.append(result)
             if on_case_complete is not None:
                 on_case_complete()
+    for result in results:
+        result.run_id = run_id
+        result.dataset_id = dataset_name
     return EvaluationRun(
-        run_id=str(uuid4()),
+        run_id=run_id,
+        status="failed" if all(result.error for result in results) else "partial" if any(result.error for result in results) else "completed",
+        error="No cases could be evaluated. Expand the case details for errors." if all(result.error for result in results) else None,
         dataset_name=dataset_name,
         dataset_sha256=content_sha256 or dataset_sha256(dataset_name),
         generated_at=datetime.now(timezone.utc),

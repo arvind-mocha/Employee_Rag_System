@@ -235,6 +235,12 @@ export type EvaluationCategory =
   | 'unanswerable'
 
 export interface EvaluationResult {
+  run_id?: string | null
+  job_id?: string | null
+  error_category?: string | null
+  failed_stage?: string | null
+  error_provider?: Provider | null
+  error_model?: string | null
   dataset_id: string | null
   dataset_name: string | null
   record_id: string
@@ -283,6 +289,8 @@ export interface ProviderSummary {
 }
 
 export interface EvaluationRun {
+  status?: 'completed' | 'partial' | 'failed'
+  error?: string | null
   run_id: string
   dataset_id: string | null
   dataset_name: string

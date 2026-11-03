@@ -51,10 +51,17 @@ Immediately before submission, the frontend fetches credential status again.
 The synchronous and asynchronous endpoints validate all selected answer and judge
 providers, including saved model, expiry, and decryptability. The worker repeats
 the validation when execution starts. Invalid selections return an actionable,
-provider-specific error without queuing a job or making provider calls. Status
-lookup failures return `503`; missing/expired credentials or models return `422`.
-Keys never appear in job payloads or results. A provider may still reject a
-locally configured key during a real model call.
+provider-specific error before queuing a job. After local validation, preflight
+requires completed ingestion, valid retrieval limits, and a registered worker for
+asynchronous runs. It makes a small answer request for every selected answer
+provider and a separate structured-output request for the judge, even when both
+roles use the same provider. These probes consume provider tokens and can incur
+charges. Each probe uses a 20-second timeout without retries; the worker repeats
+preflight when execution starts to catch configuration changes after submission.
+Authentication, quota, model, or judge-format failures return an actionable `422`;
+transient provider and readiness failures return `503`. Keys never appear in job
+payloads or results. Model access, operation support, permissions, and available
+quota are verified only to the extent of these real probe requests.
 
 Expired secrets are cleared when read and by the periodic cleanup task. Only
 provider/model/expiry metadata remains, enabling the amber expired status.
@@ -186,16 +193,68 @@ reference answer, generated answer, metric scores, and warnings for each case.
 Legacy evidence/corpus fingerprints still report `current`, `stale`, or
 `unverifiable` freshness. Freshness is reported alongside scores; review stale
 references manually after corpus changes. User-authored records without freshness
-hashes normally report `unverifiable` and remain evaluable.
+hashes normally report `unverifiable` and remain evaluable. Explicit `null` for
+optional lists, evidence, metadata, retrieval configuration, category, or review
+status uses the same default as an omitted field. Required strings and malformed
+evidence entries still fail validation. Missing evidence yields unavailable
+retrieval metrics and a warning, while answer and judge scoring continue. Empty
+retrieval results are passed to the grounded prompt so the model can abstain.
 
 ## Jobs
 
 `POST /api/v1/evaluations/run/async` returns a job ID and status URL. Polling
 reports `queued`, `running`, `completed`, `failed`, `deferred`, `scheduled`,
 `stopped`, or `canceled`, plus completed/total model-answer counts and the current
-dataset ID. The result is returned inside `result` when the job completes.
+dataset ID. The result is returned inside `result` when the job completes. Individual and
+aggregate runs carry `status` (`completed`, `partial`, or `failed`). If every case
+errors, the job reports `failed` and retains its results for inspection. A valid
+low score remains a scored failure, distinct from an evaluation exception.
+
+Every failed case stores `error_category`, `failed_stage`, a sanitized `error`,
+`error_provider`, `error_model`, dataset/record IDs, and run/job IDs. Expand a case
+to see these diagnostics. Earlier persisted results have their original messages
+but cannot recover stage/model metadata that was never saved. Backend logs retain
+exception types and traceback frames; upstream message bodies, headers, source
+lines, and local values are omitted because providers can echo API keys, including
+partially masked keys. Failed cases have no fabricated scores. All stages run
+inside the question boundary; the error builder does not recalculate metrics.
+
+Provider requests disable SDK retries and use at most three attempts for transient
+connection/timeouts, server errors, or rate limits with short bounded backoff.
+Authentication, permissions, invalid models, and exhausted quota are not retried.
 Redis retains results for 24 hours by default; preserve important reports before
 expiry. Persist Redis storage to retain job state across service restarts.
 
 LLM grading and estimated cost have practical uncertainty. Use representative,
 reviewed reference files and inspect failures before making quality decisions.
+
+
+## Diagnosis verified on 2026-11-02
+
+The saved OpenAI-answer jobs `02fca7b9-b93a-4b12-a4c0-19204472796a`,
+`e4ea5c13-2728-43c9-88e8-439e6bbf90c6`, and
+`27d3aef3-9391-45d3-a061-4a1bf966a992` each contain 36 cases with the same saved
+OpenAI credential rejection and no generated answer. A minimal live request from
+the worker independently returned HTTP **401**, code **invalid_api_key** for the
+configured OpenAI model. The selected Grok judge independently returned HTTP
+**400** with an incorrect-key rejection. No secret values were retained in this
+report. Both services could read and decrypt both credentials; ingestion was
+completed and one worker was registered. The uploaded `EmployeeData` dataset
+validated all 36 schema-v2 records, including two without reference evidence.
+
+The rejection occurs during answer-provider invocation, before the judge or
+score calculation. The old UI replaced any case error with the generic
+“Evaluation error” row label. The backend also treated all-error runs as completed
+and did not store stage/category metadata. These behaviors concealed a shared
+provider failure as many independent question failures.
+
+Replace the rejected OpenAI and Grok credentials in Settings. Valid model access,
+account permissions, quota, and a successful live evaluation remain unverified
+until accepted credentials are available. Passing mocked tests does not establish
+a successful live evaluation.
+
+Regression tests: `python -m pytest -q`, then `npm test`, `npm run lint`,
+`npx tsc -b`, and `npm run build` in `frontend/`. The optional
+`tests/integration_evaluation_redis.py` smoke test uses a unique real Redis queue,
+a temporary JSONL upload, a real RQ worker and result persistence, and mocked
+retrieval/model responses. It cleans up only its own test queue and job.
